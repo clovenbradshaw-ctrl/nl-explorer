@@ -2881,8 +2881,16 @@ async function ingest(text, title, source) {
   // 6. INS + DEF — explicitly defined terms (even below threshold)
   stageINS_definitions(log, defSyntax, entityAnchors, da);
 
-  // 7. CON — sentence-level co-occurrence
+  // 7. CON — sentence-level co-occurrence + heuristic SPO (Phase 4 tier 1)
   stageCON_cooccurrence(log, sentences, entityAnchors, da);
+  try {
+    const llmQueue = stageSPO(log, sentences, entityAnchors, da);
+    // Stash the LLM queue on the log for optional later processing. The
+    // LLM pass is opt-in (rate-limit + key concerns) — see stageSPO_llm.
+    log._llmQueue = llmQueue;
+  } catch (err) {
+    console.warn('stageSPO (heuristic) failed:', err);
+  }
 
   // 8. SYN — connected components + hub topology from CON graph
   stageSYN(log, entityAnchors, da);
@@ -3360,6 +3368,71 @@ function detectGramFeatures(pronoun) {
   };
 }
 
+// Post-ingest coref upgrade. After runIngest has pushed every INS to the
+// fold worker (so M state + grain queues are populated), walk back over
+// the unresolved pronoun SIGs and ask the worker to resolve them. New CON
+// or NUL entries are appended to both the in-memory log and the worker.
+async function resolvePronounsPostIngest(log, da) {
+  if (!workerBridge.ready) return 0;
+  const pendingPronouns = log.entries().filter(e =>
+    e.op === 'SIG'
+    && e.operand?.detector === 'PRONOUN'
+    && e.operand?.resolution_status === 'unresolved'
+    && e.provenance?.doc_anchor === da
+  );
+  let resolved = 0;
+  for (const sigEntry of pendingPronouns) {
+    const pronoun = sigEntry.operand?.text || '';
+    if (!pronoun) continue;
+    const gram = detectGramFeatures(pronoun);
+    let resolution;
+    try {
+      resolution = await workerRequest(workerBridge.foldWorker, 'resolve_coreference', {
+        text: pronoun,
+        position: sigEntry.provenance.span_start,
+        gram_features: gram,
+      });
+    } catch { continue; }
+
+    if (resolution?.resolved) {
+      const conEntry = makeEntry('CON',
+        anchor('coref:' + sigEntry.anchor + ':' + resolution.anchor),
+        sigEntry.anchor, {
+          object_anchor: resolution.anchor,
+          relation_type: 'coreference',
+          pronoun_text: pronoun,
+          resolution_grain: resolution.grain,
+          alternatives: resolution.alternatives,
+        }, {
+          source: 'mechanical:coref_integral_fold',
+          span_start: sigEntry.provenance.span_start,
+          span_end: sigEntry.provenance.span_end,
+          doc_anchor: da,
+          confidence: resolution.confidence || 0,
+        });
+      log.push(conEntry);
+      await appendToLog(conEntry);
+      resolved++;
+    } else if (resolution) {
+      const nulEntry = makeEntry('NUL',
+        anchor('nul:coref:' + sigEntry.anchor), `doc:${da}`, {
+          absence_type: resolution.nul_state,
+          signal: pronoun,
+          expected: 'coreference_anchor',
+        }, {
+          source: 'mechanical:coref_nul',
+          span_start: sigEntry.provenance.span_start,
+          span_end: sigEntry.provenance.span_end,
+          doc_anchor: da,
+          confidence: 0.85,
+        });
+      log.push(nulEntry);
+      await appendToLog(nulEntry);
+    }
+  }
+  return resolved;
+}
+
 async function stageSIG_pronouns_withCoref(log, text, da) {
   // Falls back to the legacy shallow pass if workers aren't ready.
   if (!workerBridge.ready) {
@@ -3429,6 +3502,94 @@ async function stageSIG_pronouns_withCoref(log, text, da) {
   }
 }
 
+// ── Optional LLM SPO pass (Phase 4 tier 3) ─────────────────────
+//
+// Runs on-demand against the queue collected by stageSPO. Requires the
+// caller to provide an API key + endpoint via window.EO_LLM_CONFIG so the
+// page ships without embedded secrets.
+async function stageSPO_llm(sentences, entityAnchors, da, log, opts = {}) {
+  const cfg = opts.config || (typeof window !== 'undefined' ? window.EO_LLM_CONFIG : null);
+  if (!cfg || !cfg.endpoint) {
+    console.warn('stageSPO_llm: window.EO_LLM_CONFIG.endpoint not set — skipping');
+    return 0;
+  }
+  const batch = sentences.slice(0, opts.batchSize || 20);
+  if (!batch.length) return 0;
+
+  const prompt = `Extract all Subject-Predicate-Object triples from each sentence.
+Return JSON array: [{"s":"subject","p":"predicate","o":"object","sentence_index":N}]
+Only extract triples where both subject and object are named entities.
+Return only JSON, no other text.
+
+Sentences:
+${batch.map((item, i) => `${i}: ${item.sent}`).join('\n')}`;
+
+  let added = 0;
+  try {
+    const response = await fetch(cfg.endpoint, {
+      method: 'POST',
+      headers: Object.assign(
+        { 'Content-Type': 'application/json' },
+        cfg.headers || {}
+      ),
+      body: JSON.stringify(Object.assign({
+        model: cfg.model || 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }],
+      }, cfg.body || {})),
+    });
+    const data = await response.json();
+    const rawText = data?.content?.[0]?.text || data?.choices?.[0]?.message?.content || '[]';
+    const triples = JSON.parse(rawText.replace(/```json|```/g, '').trim());
+
+    for (const t of triples) {
+      const item = batch[t.sentence_index];
+      if (!item) continue;
+      const sNorm = normalizeNP(t.s);
+      const oNorm = normalizeNP(t.o);
+      const sAnchor = entityAnchors[sNorm] || findNearestAnchor(sNorm, entityAnchors);
+      const oAnchor = entityAnchors[oNorm] || findNearestAnchor(oNorm, entityAnchors);
+      if (!sAnchor || !oAnchor) continue;
+      const predNorm = (t.p || '').toLowerCase();
+      log.push(makeEntry('CON',
+        anchor(`llm_spo:${sAnchor}:${predNorm}:${oAnchor}`), sAnchor, {
+          object_anchor: oAnchor,
+          predicate: t.p,
+          predicate_normalized: predNorm,
+          relation_type: 'spo_llm',
+          spo: { s: t.s, p: t.p, o: t.o },
+          sentence_fragment: (item.sent || '').slice(0, 120),
+        }, {
+          source: 'llm:spo_extraction',
+          doc_anchor: da,
+          confidence: 0.85,
+        }));
+      added++;
+    }
+  } catch (e) {
+    console.warn('LLM SPO pass failed:', e);
+  }
+  return added;
+}
+
+// Expose a thin helper so operators can trigger the LLM pass from the console.
+if (typeof window !== 'undefined') {
+  window.runLLM_SPO = async function runLLM_SPO() {
+    if (!state.docs.length) return 0;
+    const doc = state.docs[state.activeDoc];
+    const queue = doc.log?._llmQueue || [];
+    if (!queue.length) { console.log('no queued sentences'); return 0; }
+    const entityAnchors = {};
+    for (const e of doc.log.entries()) {
+      if (e.op === 'INS' && e.target === 'entity-registry') {
+        const dn = resolveDisplayName(e.anchor);
+        if (dn) entityAnchors[normalizeNP(dn)] = e.anchor;
+      }
+    }
+    return stageSPO_llm(queue, entityAnchors, doc.doc_anchor, doc.log);
+  };
+}
+
 // Kick off worker initialisation in the background — never blocks the page.
 if (typeof window !== 'undefined') {
   window.addEventListener('load', () => {
@@ -3459,6 +3620,12 @@ function runIngest() {
     if (workerBridge.ready) {
       for (const entry of log.entries()) {
         await appendToLog(entry);
+      }
+      // Phase 3: now that INS entries have populated the fold worker's grain
+      // queues, walk pronoun SIGs back through integral-fold coref. Adds
+      // CON/NUL entries to the log in place so downstream stages see them.
+      try { await resolvePronounsPostIngest(log, doc_anchor); } catch (e) {
+        console.warn('post-ingest coref failed:', e);
       }
       try { await storeResolvedSpans(log, doc_anchor); } catch {}
       try { await workerRequest(workerBridge.foldWorker, 'flush', {}); } catch {}
@@ -3556,11 +3723,40 @@ function newDoc() {
   document.getElementById('doc-input').focus();
 }
 
+// Active rendering grain — toggled by UI below. Defaults to sentence; the
+// OPFS renderer filters span events accordingly (clause ⊃ sentence ⊃
+// paragraph in terms of how much detail bleeds through).
+let currentGrain = 'sentence';
+
 function renderDocViewer() {
   if (state.docs.length === 0) return;
   const doc = state.docs[state.activeDoc];
   const viewer = document.getElementById('doc-viewer');
+  // Plain-text fallback so the viewer always shows _something_ instantly.
   viewer.innerHTML = escapeHtml(doc.text);
+  // Overlay the OPFS-backed annotated render when available. Silent no-op
+  // when workers/OPFS aren't ready (e.g. loaded from file://).
+  renderDocumentFromOPFS(doc.doc_anchor, currentGrain).then(html => {
+    if (typeof html === 'string' && html.length > 0) {
+      viewer.innerHTML = html;
+    }
+  }).catch(() => {});
+}
+
+// Expose a grain switcher for consoles / keyboard shortcut wiring. Press
+// 1/2/3 in the ingest view to flip between clause / sentence / paragraph.
+if (typeof window !== 'undefined') {
+  window.setRenderGrain = function setRenderGrain(g) {
+    if (!['clause','sentence','paragraph'].includes(g)) return;
+    currentGrain = g;
+    try { renderDocViewer(); } catch {}
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
+    if (e.key === '1') window.setRenderGrain('clause');
+    else if (e.key === '2') window.setRenderGrain('sentence');
+    else if (e.key === '3') window.setRenderGrain('paragraph');
+  });
 }
 
 function renderLog() {
