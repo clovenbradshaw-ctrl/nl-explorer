@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.DS_Store
+node_modules/
+
+# Generated diagnostics — keep centroids.json checked in, skip the rest
+alignment_matrix.json
+centroid_stats.json
