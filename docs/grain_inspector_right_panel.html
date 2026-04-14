@@ -1,0 +1,491 @@
+
+<h2 class="sr-only">Right panel grain inspector — click any grain level to see how the inspector adapts from token to concept cluster</h2>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+.wrap{display:grid;grid-template-columns:1fr 272px;height:640px;border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);overflow:hidden;font-family:var(--font-sans);font-size:13px;background:var(--color-background-primary);}
+.left{display:flex;flex-direction:column;overflow:hidden;border-right:0.5px solid var(--color-border-tertiary);}
+.doc-area{flex:1;overflow-y:auto;padding:20px 22px;}
+.doc-head{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);letter-spacing:.12em;text-transform:uppercase;margin-bottom:14px;}
+.doc-body{font-family:var(--font-serif);font-size:13.5px;line-height:1.9;color:var(--color-text-secondary);}
+.grain-strip{border-top:0.5px solid var(--color-border-tertiary);padding:8px 12px;display:flex;gap:4px;align-items:center;background:var(--color-background-secondary);flex-wrap:wrap;}
+.gs-label{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);letter-spacing:.1em;margin-right:4px;}
+.gs-btn{font-family:var(--font-mono);font-size:9px;padding:3px 8px;border-radius:3px;border:0.5px solid var(--color-border-secondary);background:transparent;color:var(--color-text-secondary);cursor:pointer;transition:all .12s;letter-spacing:.04em;}
+.gs-btn:hover{border-color:var(--color-border-primary);color:var(--color-text-primary);}
+.gs-btn.act{background:var(--color-text-primary);color:var(--color-background-primary);border-color:var(--color-text-primary);}
+.right{display:flex;flex-direction:column;overflow:hidden;background:var(--color-background-secondary);}
+.r-topbar{padding:8px 12px;border-bottom:0.5px solid var(--color-border-tertiary);display:flex;align-items:center;gap:6px;background:var(--color-background-primary);}
+.r-title{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);letter-spacing:.12em;text-transform:uppercase;flex:1;}
+.read-state{display:flex;align-items:center;gap:4px;font-family:var(--font-mono);font-size:9px;}
+.rs-icon{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
+.rs-ghost{border:1px dashed var(--color-border-secondary);background:transparent;}
+.rs-skim{border:1px solid #BA7517;background:transparent;}
+.rs-read{background:#1D9E75;}
+.rs-reread{background:#378ADD;}
+.r-body{flex:1;overflow-y:auto;}
+.crumb-zone{padding:8px 12px;border-bottom:0.5px solid var(--color-border-tertiary);background:var(--color-background-primary);}
+.crumb-row{display:flex;gap:0;align-items:center;overflow-x:auto;padding-bottom:2px;}
+.crumb-item{display:flex;align-items:center;gap:0;flex-shrink:0;}
+.crumb-btn{font-family:var(--font-mono);font-size:9px;padding:3px 7px;border-radius:3px;cursor:pointer;color:var(--color-text-tertiary);transition:all .1s;white-space:nowrap;}
+.crumb-btn:hover{color:var(--color-text-secondary);background:var(--color-background-secondary);}
+.crumb-btn.current{color:var(--color-text-primary);background:var(--color-background-secondary);font-weight:500;}
+.crumb-sep{font-size:10px;color:var(--color-border-primary);padding:0 1px;}
+.focus-zone{padding:10px 12px;border-bottom:0.5px solid var(--color-border-tertiary);}
+.fz-header{display:flex;align-items:center;gap:6px;margin-bottom:6px;}
+.grain-badge{font-family:var(--font-mono);font-size:8px;padding:2px 6px;border-radius:3px;flex-shrink:0;}
+.fz-name{font-size:13px;font-weight:500;color:var(--color-text-primary);margin-bottom:2px;line-height:1.3;}
+.fz-anchor{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);margin-bottom:6px;}
+.fz-text{font-family:var(--font-serif);font-size:11.5px;color:var(--color-text-secondary);line-height:1.5;padding:6px 8px;background:var(--color-background-secondary);border-radius:var(--border-radius-md);border:0.5px solid var(--color-border-tertiary);}
+.read-bar{margin-top:8px;padding:6px 8px;border-radius:var(--border-radius-md);border:0.5px solid var(--color-border-tertiary);display:flex;align-items:center;gap:8px;background:var(--color-background-primary);}
+.rb-icon{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.rb-text{font-size:11px;color:var(--color-text-secondary);flex:1;}
+.rb-action{font-family:var(--font-mono);font-size:9px;padding:2px 7px;border-radius:3px;border:0.5px solid var(--color-border-secondary);background:transparent;color:var(--color-text-secondary);cursor:pointer;transition:all .1s;white-space:nowrap;}
+.rb-action:hover{border-color:var(--color-border-primary);color:var(--color-text-primary);}
+.rb-action.reading{color:#1D9E75;border-color:rgba(29,158,117,.4);animation:pulse .8s ease-in-out infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.contains-zone{padding:8px 12px;border-bottom:0.5px solid var(--color-border-tertiary);}
+.cz-hdr{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px;}
+.contains-row{display:flex;align-items:center;gap:5px;padding:3px 0;cursor:pointer;transition:background .1s;border-radius:3px;padding:3px 4px;margin:0 -4px;}
+.contains-row:hover{background:var(--color-background-primary);}
+.cr-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
+.cr-label{font-size:11px;color:var(--color-text-secondary);flex:1;}
+.cr-read{font-family:var(--font-mono);font-size:8px;color:var(--color-text-tertiary);}
+.rel-zone{padding:8px 12px;border-bottom:0.5px solid var(--color-border-tertiary);}
+.rz-hdr{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px;display:flex;justify-content:space-between;align-items:center;}
+.rz-honesty{font-size:9px;color:var(--color-text-tertiary);font-style:italic;}
+.rel-row{display:flex;align-items:flex-start;gap:6px;padding:4px 0;border-bottom:0.5px solid var(--color-border-tertiary);cursor:pointer;}
+.rel-row:last-child{border-bottom:none;}
+.rel-row:hover .rr-label{color:var(--color-text-primary);}
+.rr-op{font-family:var(--font-mono);font-size:8px;padding:1px 5px;border-radius:3px;flex-shrink:0;margin-top:1px;}
+.rr-info{flex:1;min-width:0;}
+.rr-label{font-size:11px;color:var(--color-text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.rr-basis{font-size:10px;color:var(--color-text-tertiary);font-style:italic;}
+.rr-conf{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);flex-shrink:0;align-self:center;}
+.conf-unk{font-style:italic;color:var(--color-text-tertiary);}
+.cluster-zone{padding:8px 12px;border-bottom:0.5px solid var(--color-border-tertiary);}
+.doc-contrib{display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:3px;cursor:pointer;transition:background .1s;margin:0 -4px;}
+.doc-contrib:hover{background:var(--color-background-primary);}
+.dc-bar{flex:1;height:3px;background:var(--color-border-tertiary);border-radius:2px;overflow:hidden;}
+.dc-fill{height:100%;border-radius:2px;background:#1D9E75;}
+.dc-label{font-size:11px;color:var(--color-text-secondary);width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.dc-pct{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);width:28px;text-align:right;}
+.eva-zone{padding:8px 12px;}
+.ev-row{display:flex;gap:6px;padding:3px 0;align-items:flex-start;border-bottom:0.5px solid var(--color-border-tertiary);}
+.ev-row:last-child{border-bottom:none;}
+.ev-badge{font-family:var(--font-mono);font-size:8px;padding:1px 5px;border-radius:3px;flex-shrink:0;margin-top:1px;}
+.ev-text{font-size:11px;color:var(--color-text-secondary);line-height:1.4;}
+.sp{border-radius:2px;padding:1px 2px;cursor:pointer;transition:all .1s;}
+.sp:hover{filter:brightness(.9);}
+.sp.sel{outline:1.5px solid currentColor;outline-offset:1px;}
+.sp-tok{background:rgba(83,74,183,.14);color:#3C3489;}
+.sp-cl{background:rgba(186,118,50,.14);color:#633806;}
+.sp-sent{background:rgba(29,158,117,.14);color:#085041;}
+.sp-para{background:rgba(55,138,221,.1);color:#0C447C;}
+.sp-fn{background:rgba(163,45,45,.1);color:#791F1F;}
+.sp-dim{opacity:.3;}
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:8px;color:var(--color-text-tertiary);padding:20px;text-align:center;}
+.em-icon{font-size:20px;opacity:.3;}
+</style>
+
+<div class="wrap">
+<div class="left">
+  <div class="doc-area">
+    <div class="doc-head">NDP Investigation · 2025-01-08 · TEXT</div>
+    <div class="doc-body" id="doc-body"></div>
+  </div>
+  <div class="grain-strip">
+    <span class="gs-label">focus grain</span>
+    <button class="gs-btn" onclick="setDemo('token')">token</button>
+    <button class="gs-btn act" onclick="setDemo('clause')">clause</button>
+    <button class="gs-btn" onclick="setDemo('sentence')">sentence</button>
+    <button class="gs-btn" onclick="setDemo('paragraph')">paragraph</button>
+    <button class="gs-btn" onclick="setDemo('section')">section</button>
+    <button class="gs-btn" onclick="setDemo('document')">document</button>
+    <button class="gs-btn" onclick="setDemo('cluster')">cluster</button>
+  </div>
+</div>
+
+<div class="right">
+  <div class="r-topbar">
+    <span class="r-title">relation inspector</span>
+    <div class="read-state" id="read-state">
+      <div class="rs-icon rs-ghost" id="rs-icon"></div>
+      <span id="rs-label" style="color:var(--color-text-tertiary)">nothing focused</span>
+    </div>
+  </div>
+  <div class="r-body" id="r-body">
+    <div class="empty-state">
+      <div class="em-icon">○</div>
+      <div style="font-size:12px;">click a grain button or any span</div>
+      <div style="font-family:var(--font-mono);font-size:10px;">click = SIG · focus = read</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const GRAIN_META = {
+  token:{col:'#534AB7',bg:'rgba(83,74,183,.14)',tcol:'#3C3489',label:'token'},
+  clause:{col:'#BA7517',bg:'rgba(186,118,50,.14)',tcol:'#633806',label:'clause'},
+  sentence:{col:'#1D9E75',bg:'rgba(29,158,117,.14)',tcol:'#085041',label:'sentence'},
+  paragraph:{col:'#378ADD',bg:'rgba(55,138,221,.12)',tcol:'#0C447C',label:'paragraph'},
+  section:{col:'#A32D2D',bg:'rgba(163,45,45,.1)',tcol:'#791F1F',label:'section'},
+  document:{col:'#5F5E5A',bg:'rgba(95,94,90,.1)',tcol:'#444441',label:'document'},
+  cluster:{col:'#0F6E56',bg:'rgba(15,110,86,.12)',tcol:'#085041',label:'concept cluster'},
+};
+
+const DEMOS = {
+  token:{
+    name:'authorization',anchor:'@tok_auth_290',
+    readState:'skim',
+    text:'"authorization"',
+    parent_chain:['NDP Investigation','§ Findings','Para 3','…no record of original authorization exists…','clause: no record exists'],
+    contains:[],
+    sig_note:'Token appearing 3× in this doc, 7× across corpus. Not yet embedded — skim-tier only.',
+    relations:[
+      {op:'SIG',label:'authorization chain (INS\'d)',basis:'co-occurs 5× within 20 tokens',conf:'skim',read:false},
+      {op:'SIG',label:'Metro Council (INS\'d)',basis:'same sentence 3×',conf:'skim',read:false},
+      {op:'SIG',label:'Mayor Cooper\'s office',basis:'paragraph co-inhabitant',conf:'skim',read:false},
+    ],
+    eva:[],
+    honesty:'guessing from token proximity — not yet read',
+  },
+  clause:{
+    name:'failed to disclose the allocation',anchor:'@cl_nul_101',
+    readState:'read',
+    readTs:'2025-01-09 · 14:32',
+    text:'"…but failed to disclose the allocation in its annual report."',
+    parent_chain:['NDP Investigation','§ Findings','Para 1','Sentence 1'],
+    contains:[
+      {label:'failed to disclose',grain:'token',read:true,op:'NUL'},
+      {label:'the allocation',grain:'token',read:false,op:'SIG'},
+      {label:'annual report',grain:'token',read:false,op:'SIG'},
+    ],
+    cell:'NUL(Existence, Figure)',
+    cellConf:.88,
+    spo:{s:'Nashville Downtown Partnership',p:'failed to disclose',o:'allocation'},
+    relations:[
+      {op:'NUL',label:'annual report disclosure',basis:'embedded · 0.91 sim',conf:.91,read:true},
+      {op:'CON',label:'Nashville Downtown Partnership',basis:'embedded · 0.87 sim',conf:.87,read:true},
+      {op:'SIG',label:'Metro audit trail',basis:'skim · symbol match',conf:'skim',read:false},
+    ],
+    eva:[{result:'satisfies',text:'NUL corroborated — Annual Report contains no disclosure entry',src:'NDP Annual Report'}],
+    nul_state:'cleared',
+  },
+  sentence:{
+    name:'NDP received $4.2M in public funds',anchor:'@sent_001',
+    readState:'read',
+    readTs:'2025-01-09 · 14:30',
+    text:'"The Nashville Downtown Partnership received $4.2 million in public funds from Metro Nashville in fiscal year 2019, but failed to disclose the allocation in its annual report."',
+    parent_chain:['NDP Investigation','§ Findings','Para 1'],
+    contains:[
+      {label:'Nashville Downtown Partnership',grain:'clause',read:true,op:'INS'},
+      {label:'received $4.2M…',grain:'clause',read:true,op:'EVA'},
+      {label:'fiscal year 2019',grain:'clause',read:true,op:'DEF'},
+      {label:'failed to disclose…',grain:'clause',read:true,op:'NUL'},
+    ],
+    cell:'EVA(Significance, Figure)',
+    cellConf:.84,
+    spo:{s:'NDP',p:'received / failed to disclose',o:'$4.2M · allocation'},
+    relations:[
+      {op:'EVA',label:'$4.2M transfer (EVA)',basis:'embedded · 0.89 sim',conf:.89,read:true},
+      {op:'CON',label:'Metro Nashville',basis:'embedded · 0.84 sim',conf:.84,read:true},
+      {op:'NUL',label:'disclosure gap',basis:'embedded · 0.88 sim',conf:.88,read:true},
+      {op:'SIG',label:'NDMC PSO LLC',basis:'skim · structural neighbor',conf:'skim',read:false},
+    ],
+    eva:[
+      {result:'conflicts',text:'Annual Report asserts $1.9M for same fiscal period',src:'NDP Annual Report'},
+    ],
+  },
+  paragraph:{
+    name:'Para 1 — funding and disclosure',anchor:'@para_001',
+    readState:'skim',
+    text:'Full paragraph spanning the NDP funding receipt, disclosure failure, authorization chain, and Metro Council approval.',
+    parent_chain:['NDP Investigation','§ Findings'],
+    contains:[
+      {label:'Sentence 1 — NDP received $4.2M',grain:'sentence',read:true,op:'EVA'},
+      {label:'Sentence 2 — Mayor Cooper authorized',grain:'sentence',read:false,op:'CON'},
+      {label:'Sentence 3 — NDP transferred to contractor',grain:'sentence',read:false,op:'CON'},
+      {label:'Sentence 4 — Metro Council approved',grain:'sentence',read:false,op:'INS'},
+    ],
+    cell:'SYN(Structure, Pattern)',
+    cellConf:.71,
+    relations:[
+      {op:'SYN',label:'Authorization chain topology',basis:'embedded · 0.82 sim (para summary)',conf:.82,read:true},
+      {op:'INS',label:'Nashville Downtown Partnership',basis:'embedded · dominant entity',conf:.94,read:true},
+      {op:'SIG',label:'NDMC PSO LLC',basis:'skim · appears in para 2',conf:'skim',read:false},
+      {op:'SIG',label:'shell entity pattern',basis:'skim · structural neighbor',conf:'skim',read:false},
+    ],
+    eva:[],
+    honesty:'para summary embedded — 3 of 4 sentences unread at sentence grain',
+  },
+  section:{
+    name:'§ Findings — funding irregularities',anchor:'@sec_findings',
+    readState:'skim',
+    text:'Section spanning paragraphs 1–4 of the investigation covering NDP funding, authorization chain, and conflict of figures.',
+    parent_chain:['NDP Investigation'],
+    contains:[
+      {label:'Para 1 — funding and disclosure',grain:'paragraph',read:false,op:'SYN'},
+      {label:'Para 2 — authorization and shell',grain:'paragraph',read:false,op:'CON'},
+      {label:'Para 3 — absence signals',grain:'paragraph',read:false,op:'NUL'},
+      {label:'Para 4 — conflicting figures',grain:'paragraph',read:false,op:'REC'},
+    ],
+    cell:null,
+    relations:[
+      {op:'SIG',label:'authorization chain',basis:'skim · high-freq symbol in section',conf:'skim',read:false},
+      {op:'SIG',label:'Metro Council',basis:'skim · symbol appears 4×',conf:'skim',read:false},
+      {op:'SIG',label:'fiscal year 2019–2021',basis:'skim · temporal span detected',conf:'skim',read:false},
+    ],
+    eva:[],
+    honesty:'section not yet embedded — all relations from skim signals only',
+  },
+  document:{
+    name:'NDP Investigation',anchor:'@doc_ndp_inv',
+    readState:'read',
+    readTs:'2025-01-08 · 11:14 (summary embedding)',
+    text:'Full document — 847 words · 6 paragraphs · 23 detected entities · summary vector computed on ingest.',
+    parent_chain:[],
+    contains:[
+      {label:'§ Findings',grain:'section',read:false,op:'SYN'},
+      {label:'§ Authorization chain',grain:'section',read:false,op:'CON'},
+      {label:'§ Conflicting figures',grain:'section',read:false,op:'REC'},
+    ],
+    cell:'SYN(Structure, Pattern)',
+    cellConf:.76,
+    relations:[
+      {op:'CON',label:'NDP Annual Report',basis:'doc-level embedded · 0.79 sim',conf:.79,read:true},
+      {op:'CON',label:'THP Email Thread',basis:'doc-level embedded · 0.71 sim',conf:.71,read:true},
+      {op:'SIG',label:'MNPD MOU Draft',basis:'skim · shared symbols',conf:'skim',read:false},
+    ],
+    eva:[
+      {result:'conflicts',text:'3 entities have conflicting values vs NDP Annual Report at sentence grain',src:'cross-doc EVA'},
+    ],
+  },
+  cluster:{
+    name:'Nashville Downtown Partnership',anchor:'@cluster_ndp',
+    readState:'reread',
+    readTs:'2025-01-09 · 14:35 (from current position)',
+    text:'Synthetic entity. No single text span. Emerges from 14 INS events across 3 documents. Cluster centroid computed from all embedded spans.',
+    parent_chain:[],
+    contains:[],
+    docContribs:[
+      {doc:'NDP Investigation',pct:52,spans:7,read:true},
+      {doc:'NDP Annual Report',pct:31,spans:4,read:true},
+      {doc:'THP Email Thread',pct:17,spans:2,read:false},
+    ],
+    cell:'SYN(Structure, Pattern)',
+    cellConf:.91,
+    relations:[
+      {op:'CON',label:'NDMC PSO LLC',basis:'embedded · same_as confirmed · 0.94',conf:.94,read:true},
+      {op:'CON',label:'Metro Nashville',basis:'embedded · 0.82 sim',conf:.82,read:true},
+      {op:'EVA',label:'$4.2M / $1.9M conflict',basis:'embedded · cross-doc EVA',conf:.91,read:true},
+      {op:'NUL',label:'authorization chain',basis:'embedded · absence confirmed',conf:.88,read:true},
+      {op:'REC',label:'value conflict (pending)',basis:'frame cannot absorb both figures',conf:.86,read:true},
+    ],
+    eva:[
+      {result:'conflicts',text:'NDP Investigation: $2.3M. Annual Report: $1.9M. Same period, same entity.',src:'cross-doc'},
+      {result:'satisfies',text:'NDP as payer via NDMC PSO LLC — consistent across all 3 documents',src:'cross-doc'},
+    ],
+    pressure:{z:1.8,level:'critical'},
+  },
+};
+
+let currentDemo = 'clause';
+let isReading = false;
+
+const RAW_TEXT = `The <sp g="token" id="t1" w="Nashville">Nashville</sp> <sp g="token" id="t2" w="Downtown">Downtown</sp> <sp g="token" id="t3" w="Partnership">Partnership</sp> <sp g="sentence" id="s1"><sp g="clause" id="cl1">received <sp g="token" id="t4" w="$4.2">$4.2</sp> million in public funds from Metro Nashville in fiscal year 2019</sp>, but <sp g="clause" id="cl2">failed to disclose the allocation in its annual report</sp></sp>. <sp g="sentence" id="s2"><sp g="token" id="t5" w="Mayor">Mayor</sp> Cooper's office authorized the transfer in March 2020.</sp> NDP transferred the funds to a private contractor without competitive bidding. <sp g="sentence" id="s3">Metro Council approved a separate $1.8 million contract with the same vendor in June 2020.</sp> <sp g="clause" id="cl3">No record of the original authorization exists in public filings.</sp> The Office of Homeless Services allocated $2.3 million to NDP in FY2020-2021, which <sp g="token" id="t6" w="contradicts">contradicts</sp> the $1.9 million figure reported in the Metro budget.`;
+
+function buildDocText(activeGrain) {
+  const grainCls = {token:'sp-tok',clause:'sp-cl',sentence:'sp-sent',paragraph:'sp-para',section:'sp-fn'};
+  return RAW_TEXT.replace(/<sp g="(\w+)"[^>]*>([\s\S]*?)<\/sp>/g, (m, g, content) => {
+    const cls = grainCls[g] || '';
+    if (!cls) return content;
+    const dimmed = activeGrain && activeGrain !== g ? ' sp-dim' : '';
+    return `<span class="sp ${cls}${dimmed}" onclick="setDemo('${g}')" title="${g} grain">${content.replace(/<sp[^>]*>([\s\S]*?)<\/sp>/g,'$1')}</span>`;
+  });
+}
+
+function setDemo(grain) {
+  currentDemo = grain;
+  document.querySelectorAll('.gs-btn').forEach(b => {
+    b.classList.toggle('act', b.textContent.trim() === grain || (grain==='cluster' && b.textContent.trim()==='cluster'));
+  });
+  document.getElementById('doc-body').innerHTML = buildDocText(
+    ['token','clause','sentence','paragraph'].includes(grain) ? grain : null
+  );
+  renderInspector(grain);
+}
+
+function renderInspector(grain) {
+  const d = DEMOS[grain];
+  if (!d) return;
+  const gm = GRAIN_META[grain];
+
+  const rsIcon = document.getElementById('rs-icon');
+  const rsLabel = document.getElementById('rs-label');
+  rsIcon.className = 'rs-icon ' + (d.readState==='read'?'rs-read':d.readState==='reread'?'rs-reread':d.readState==='skim'?'rs-skim':'rs-ghost');
+  const rsText = {ghost:'never focused',skim:'skimmed',read:'read',reread:'re-read from position'}[d.readState]||d.readState;
+  rsLabel.textContent = rsText;
+  rsLabel.style.color = d.readState==='read'?'#1D9E75':d.readState==='reread'?'#378ADD':d.readState==='skim'?'#BA7517':'var(--color-text-tertiary)';
+
+  const chain = [...(d.parent_chain||[]), grain==='cluster'?'cluster: '+d.name : gm.label];
+  const crumbs = chain.map((c,i) => {
+    const isLast = i===chain.length-1;
+    return `<div class="crumb-item">
+      ${i>0?'<span class="crumb-sep">/</span>':''}
+      <span class="crumb-btn ${isLast?'current':''}">${c.length>18?c.slice(0,17)+'…':c}</span>
+    </div>`;
+  }).join('');
+
+  const readBar = d.readState === 'ghost' || d.readState === 'skim'
+    ? `<div class="read-bar">
+        <div class="rb-icon" style="border:1px solid #BA7517;background:transparent;"></div>
+        <span class="rb-text">${d.honesty||'not yet embedded — relations from skim signals only'}</span>
+        <button class="rb-action" id="read-btn" onclick="triggerRead('${grain}')">read now</button>
+       </div>`
+    : `<div class="read-bar">
+        <div class="rb-icon" style="background:${d.readState==='reread'?'#378ADD':'#1D9E75'};"></div>
+        <span class="rb-text">${d.readState==='reread'?'re-read from current position':'embedded'} · ${d.readTs||''}</span>
+        <button class="rb-action" onclick="triggerReread('${grain}')">re-read ↻</button>
+       </div>`;
+
+  let containsHtml = '';
+  if ((d.contains||[]).length > 0) {
+    const rows = d.contains.map(c => {
+      const cop = GRAIN_META[c.grain]||{col:'#888'};
+      const readDot = c.read
+        ? `<div style="width:6px;height:6px;border-radius:50%;background:#1D9E75;flex-shrink:0;"></div>`
+        : `<div style="width:6px;height:6px;border-radius:50%;border:1px solid #BA7517;flex-shrink:0;"></div>`;
+      const opBadge = `<span style="font-family:var(--font-mono);font-size:8px;padding:1px 4px;border-radius:2px;background:rgba(128,128,128,.1);color:var(--color-text-tertiary);">${c.op}</span>`;
+      return `<div class="contains-row" onclick="setDemo('${c.grain}')">
+        ${readDot}
+        <span class="cr-label">${c.label}</span>
+        ${opBadge}
+        <span class="cr-read">${c.grain}</span>
+      </div>`;
+    }).join('');
+    containsHtml = `<div class="contains-zone">
+      <div class="cz-hdr">contains · ${d.contains.length}</div>
+      ${rows}
+    </div>`;
+  }
+
+  let clusterHtml = '';
+  if (d.docContribs) {
+    const rows = d.docContribs.map(dc => {
+      const readDot = dc.read
+        ? `<div style="width:6px;height:6px;border-radius:50%;background:#1D9E75;flex-shrink:0;"></div>`
+        : `<div style="width:6px;height:6px;border-radius:50%;border:1px solid #BA7517;flex-shrink:0;"></div>`;
+      return `<div class="doc-contrib">
+        ${readDot}
+        <span class="dc-label">${dc.doc}</span>
+        <div class="dc-bar"><div class="dc-fill" style="width:${dc.pct}%;"></div></div>
+        <span class="dc-pct">${dc.pct}%</span>
+      </div>`;
+    }).join('');
+    clusterHtml = `<div class="cluster-zone">
+      <div class="cz-hdr">document contributions</div>
+      ${rows}
+    </div>`;
+  }
+
+  const spoHtml = d.spo ? `<div style="padding:8px 12px;border-bottom:0.5px solid var(--color-border-tertiary);">
+    <div style="font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px;">SPO · ${grain} grain</div>
+    <div style="display:flex;flex-wrap:wrap;gap:4px;">
+      <span style="font-size:10px;background:rgba(29,158,117,.12);color:#085041;padding:2px 6px;border-radius:3px;">${d.spo.s}</span>
+      <span style="font-size:10px;background:rgba(186,118,50,.12);color:#633806;padding:2px 6px;border-radius:3px;">${d.spo.p}</span>
+      <span style="font-size:10px;background:rgba(55,138,221,.12);color:#0C447C;padding:2px 6px;border-radius:3px;">${d.spo.o}</span>
+    </div>
+  </div>` : '';
+
+  const honesty = d.honesty ? `<div style="font-size:10px;color:var(--color-text-tertiary);font-style:italic;padding:2px 4px;">${d.honesty}</div>` : '';
+  const relRows = (d.relations||[]).map(r => {
+    const rc = GRAIN_META[r.op?.toLowerCase()]?.col || '#888';
+    const rb = GRAIN_META[r.op?.toLowerCase()]?.bg || 'rgba(128,128,128,.1)';
+    const confDisp = r.read ? (typeof r.conf==='number'?r.conf.toFixed(2):r.conf) : r.conf;
+    const confCol = r.read ? 'var(--color-text-secondary)' : 'var(--color-text-tertiary)';
+    const basisStyle = r.read ? '' : 'font-style:italic;';
+    return `<div class="rel-row">
+      <span class="rr-op" style="background:${rb};color:${rc};">${r.op}</span>
+      <div class="rr-info">
+        <div class="rr-label">${r.label}</div>
+        <div class="rr-basis" style="${basisStyle}">${r.basis}</div>
+      </div>
+      <span class="rr-conf" style="color:${confCol};">${confDisp}</span>
+    </div>`;
+  }).join('');
+
+  const evaHtml = (d.eva||[]).length ? (d.eva||[]).map(e => {
+    const ec = e.result==='satisfies'?'#1D9E75':e.result==='conflicts'?'#A32D2D':'#BA7517';
+    const eb = e.result==='satisfies'?'rgba(29,158,117,.1)':e.result==='conflicts'?'rgba(163,45,45,.1)':'rgba(186,118,50,.1)';
+    return `<div class="ev-row">
+      <span class="ev-badge" style="background:${eb};color:${ec};">${e.result}</span>
+      <div><div class="ev-text">${e.text}</div><div style="font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);margin-top:1px;">${e.src}</div></div>
+    </div>`;
+  }).join('') : '';
+
+  const pressureHtml = d.pressure ? `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
+    <div style="font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);letter-spacing:.1em;text-transform:uppercase;">EVA history</div>
+    <span style="font-family:var(--font-mono);font-size:8px;padding:1px 6px;border-radius:3px;background:rgba(163,45,45,.1);color:#A32D2D;">z=${d.pressure.z>0?'+':''}${d.pressure.z} · ${d.pressure.level}</span>
+  </div>` : `<div style="font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px;">EVA history</div>`;
+
+  const cellHtml = d.cell ? `<div style="margin-top:6px;display:flex;align-items:center;gap:5px;">
+    <span style="font-family:var(--font-mono);font-size:8px;padding:2px 6px;border-radius:3px;background:${gm.bg};color:${gm.col};">${d.cell}</span>
+    ${d.cellConf?`<div style="width:32px;height:3px;background:var(--color-border-tertiary);border-radius:2px;overflow:hidden;"><div style="width:${Math.round(d.cellConf*100)}%;height:100%;background:${gm.col};border-radius:2px;"></div></div><span style="font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);">${Math.round(d.cellConf*100)}%</span>`:''}
+  </div>` : '';
+
+  const nulHtml = d.nul_state ? `<div style="font-family:var(--font-mono);font-size:9px;padding:3px 6px;border-radius:3px;background:rgba(153,53,86,.08);color:#993556;margin-top:4px;">absence state: ${d.nul_state}</div>` : '';
+
+  document.getElementById('r-body').innerHTML = `
+    <div class="crumb-zone"><div class="crumb-row">${crumbs}</div></div>
+    <div class="focus-zone">
+      <div class="fz-header">
+        <span class="grain-badge" style="background:${gm.bg};color:${gm.col};">${gm.label}</span>
+        ${grain==='cluster'?`<span style="font-family:var(--font-mono);font-size:8px;color:var(--color-text-tertiary);">synthetic · M only</span>`:''}
+      </div>
+      <div class="fz-name">${d.name}</div>
+      <div class="fz-anchor">${d.anchor}</div>
+      <div class="fz-text">${d.text}</div>
+      ${cellHtml}
+      ${nulHtml}
+      ${readBar}
+    </div>
+    ${containsHtml}
+    ${clusterHtml}
+    ${spoHtml}
+    <div class="rel-zone">
+      <div class="rz-hdr">relations <span class="rz-honesty" id="rel-honesty"></span></div>
+      ${honesty}
+      ${relRows}
+    </div>
+    ${evaHtml ? `<div class="eva-zone">${pressureHtml}${evaHtml}</div>` : ''}
+  `;
+}
+
+function triggerRead(grain) {
+  const btn = document.getElementById('read-btn');
+  if (!btn) return;
+  btn.textContent = 'reading…';
+  btn.classList.add('reading');
+  btn.disabled = true;
+  setTimeout(() => {
+    DEMOS[grain].readState = 'read';
+    DEMOS[grain].readTs = new Date().toLocaleString('en',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+    delete DEMOS[grain].honesty;
+    DEMOS[grain].relations = DEMOS[grain].relations.map(r => ({
+      ...r,
+      read: true,
+      conf: typeof r.conf === 'string' ? (0.6+Math.random()*.3) : r.conf,
+      basis: r.basis.replace('skim · ','embedded · ')
+    }));
+    renderInspector(grain);
+  }, 900);
+}
+
+function triggerReread(grain) {
+  DEMOS[grain].readState = 'reread';
+  DEMOS[grain].readTs = new Date().toLocaleString('en',{hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) + ' (from current position)';
+  renderInspector(grain);
+}
+
+setDemo('clause');
+</script>
