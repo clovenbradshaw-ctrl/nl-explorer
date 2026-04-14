@@ -243,6 +243,27 @@ button:hover { border-color: var(--sig); color: var(--sig); }
 .btn-process:hover { background: #fcd34d; border-color: #fcd34d; color: #000; }
 .btn-process:disabled { opacity: 0.4; cursor: default; }
 
+.grain-toggle { display: inline-flex; gap: 0; border: 1px solid var(--border2); border-radius: 3px; overflow: hidden; }
+.grain-toggle .grain-btn {
+  border: none; border-right: 1px solid var(--border2);
+  border-radius: 0; padding: 4px 10px; font-size: 11px;
+}
+.grain-toggle .grain-btn:last-child { border-right: none; }
+.grain-toggle .grain-btn.grain-active {
+  background: var(--border2); color: var(--bright);
+}
+.grain-toggle .grain-btn:hover { color: var(--sig); }
+
+.worker-ind {
+  font-size: 10px; font-family: 'JetBrains Mono', monospace;
+  padding: 3px 8px; border-radius: 3px; letter-spacing: 0.06em;
+  align-self: center; user-select: none;
+}
+.worker-ind.worker-off { color: #71717a; border: 1px solid #52525b; opacity: 0.6; }
+.worker-ind.worker-on  { color: #4e8f62; border: 1px solid #4e8f62; }
+.anno { transition: background 120ms ease; }
+.anno-active { outline: 1px solid var(--sig); }
+
 .doc-area {
   flex: 1;
   position: relative;
@@ -885,6 +906,12 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
       <div class="panel-header">
         <span class="ph-label">Document</span>
         <div class="panel-actions">
+          <span id="worker-indicator" class="worker-ind worker-off" title="OPFS worker bridge status">● OPFS</span>
+          <div class="grain-toggle" role="group" aria-label="Rendering grain">
+            <button class="grain-btn" data-grain="clause" onclick="setRenderGrain('clause')">Clause</button>
+            <button class="grain-btn grain-active" data-grain="sentence" onclick="setRenderGrain('sentence')">Sentence</button>
+            <button class="grain-btn" data-grain="paragraph" onclick="setRenderGrain('paragraph')">Paragraph</button>
+          </div>
           <button onclick="loadSampleA()">Sample A</button>
           <button onclick="loadSampleB()">Sample B</button>
           <button onclick="clearDoc()">Clear</button>
@@ -3036,8 +3063,33 @@ async function getGraphFromM() {
 
 // Optional UI hooks the main thread reacts to — wrapped in try/catch above so
 // the bridge keeps working even if the page hasn't defined them yet.
-function renderPressureMapFromData(_pressure) { /* hook point */ }
-function surfaceRECCandidate(_anchor, _rec) { /* hook point */ }
+function renderPressureMapFromData(pressure) {
+  // Minimal pressure readout: update the right-tab badge with the count of
+  // entities whose z-score exceeds 1 (i.e. one standard deviation above mean).
+  const el = document.getElementById('pressure-count');
+  if (!el) return;
+  const n = Object.values(pressure || {}).filter(v => (v?.z || 0) >= 1).length;
+  el.textContent = n ? `(${n}↑)` : '';
+}
+
+const surfacedRECs = new Set();
+function surfaceRECCandidate(anchorId, rec) {
+  if (!anchorId || surfacedRECs.has(anchorId)) return;
+  surfacedRECs.add(anchorId);
+  // Log to console so operators see the event; a future UI could surface
+  // this as a toast or pin it to the right panel.
+  console.log('[REC] candidate surfaced for', anchorId,
+              'conflicts:', rec?.operand?.conflict_count,
+              'note:', rec?.operand?.note);
+}
+
+function setWorkerIndicator(on) {
+  const el = document.getElementById('worker-indicator');
+  if (!el) return;
+  el.classList.toggle('worker-on',  !!on);
+  el.classList.toggle('worker-off', !on);
+  el.title = on ? 'OPFS worker bridge ready' : 'Workers unavailable — in-memory only';
+}
 
 // ── Document storage (Phase 2) ─────────────────────────────────
 
@@ -3594,6 +3646,7 @@ if (typeof window !== 'undefined') {
 if (typeof window !== 'undefined') {
   window.addEventListener('load', () => {
     initWorkers().then(ok => {
+      setWorkerIndicator(ok);
       if (ok) console.log('[workers] OPFS log+fold bridge ready');
     });
   });
@@ -3749,6 +3802,9 @@ if (typeof window !== 'undefined') {
   window.setRenderGrain = function setRenderGrain(g) {
     if (!['clause','sentence','paragraph'].includes(g)) return;
     currentGrain = g;
+    document.querySelectorAll('.grain-toggle .grain-btn').forEach(btn => {
+      btn.classList.toggle('grain-active', btn.dataset.grain === g);
+    });
     try { renderDocViewer(); } catch {}
   };
   window.addEventListener('keydown', (e) => {
