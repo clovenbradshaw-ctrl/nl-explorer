@@ -261,8 +261,16 @@ button:hover { border-color: var(--sig); color: var(--sig); }
 }
 .worker-ind.worker-off { color: #71717a; border: 1px solid #52525b; opacity: 0.6; }
 .worker-ind.worker-on  { color: #4e8f62; border: 1px solid #4e8f62; }
-.anno { transition: background 120ms ease; cursor: pointer; }
+.anno { transition: background 120ms ease, box-shadow 180ms ease; cursor: pointer; }
 .anno-active { outline: 1px solid var(--sig); }
+/* Live highlight for query-supporting clauses and inspector focus — the
+   doc becomes the result surface, not a side list. */
+.anno-match {
+  box-shadow: 0 0 0 2px rgba(251,191,36,0.55), 0 0 12px rgba(251,191,36,0.25);
+  background: rgba(251,191,36,0.20) !important;
+  color: var(--text);
+}
+.anno-match-dim { opacity: 0.35; filter: grayscale(0.5); }
 .log-entry.log-entry-active {
   outline: 1px solid var(--sig);
   background: rgba(251,191,36,0.06);
@@ -714,6 +722,305 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
 .pressure-map.visible { display: block; }
 .log-list.hidden { display: none; }
 
+/* ── Digest + Query panels ───────────────────────── */
+
+.digest-panel, .query-panel {
+  flex: 1;
+  display: none;
+  flex-direction: column;
+  min-height: 0;
+}
+.digest-panel.visible, .query-panel.visible { display: flex; }
+
+.digest-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 11px;
+}
+.digest-length { display: flex; gap: 2px; }
+.dlen {
+  font-family: inherit; font-size: 10px;
+  padding: 3px 8px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  letter-spacing: 0.05em;
+}
+.dlen.active {
+  color: var(--bright);
+  border-color: var(--sig);
+  background: var(--surface);
+}
+.dlen:hover { color: var(--text); }
+.digest-scope {
+  color: var(--muted);
+  font-size: 10px;
+  margin-left: auto;
+  font-style: italic;
+}
+.dbtn {
+  font-family: inherit; font-size: 11px;
+  padding: 3px 10px;
+  background: var(--surface);
+  color: var(--bright);
+  border: 1px solid var(--border2);
+  cursor: pointer;
+}
+.dbtn:hover { border-color: var(--sig); }
+
+.digest-body, .query-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.digest-empty {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; color: var(--muted);
+  flex-direction: column; gap: 10px;
+}
+
+.dig-section { margin-bottom: 14px; }
+.dig-h {
+  font-size: 10px; letter-spacing: 0.12em; color: var(--muted);
+  text-transform: uppercase; margin-bottom: 6px;
+  padding-bottom: 3px; border-bottom: 1px solid var(--border);
+}
+.dig-gist {
+  font-size: 13px; color: var(--bright);
+  padding: 6px 8px;
+  background: var(--surface);
+  border-left: 2px solid var(--sig);
+  margin-bottom: 12px;
+}
+.dig-meta {
+  font-size: 10px; color: var(--muted);
+  margin-top: 4px;
+}
+.dig-card {
+  padding: 8px;
+  border: 1px solid var(--border);
+  margin-bottom: 6px;
+  background: var(--bg);
+}
+.dig-card .dc-name {
+  color: var(--bright); font-weight: 600; font-size: 12px;
+}
+.dig-card .dc-frame {
+  color: var(--text); font-style: italic; font-size: 11px;
+  margin-top: 3px;
+}
+.dig-card .dc-edges {
+  margin-top: 5px; font-size: 11px; color: var(--muted);
+}
+.dig-card .dc-edges .de { display: block; }
+.dig-card .dc-quote {
+  margin-top: 6px; padding: 5px 7px;
+  background: var(--surface);
+  border-left: 2px solid var(--border2);
+  color: var(--text); font-style: italic;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dig-card .dc-quote:hover { border-left-color: var(--sig); }
+.dig-card .dc-stats {
+  margin-top: 5px; font-size: 10px; color: var(--muted);
+  display: flex; gap: 10px; flex-wrap: wrap;
+}
+.dig-card.contested { border-left: 2px solid var(--nul); }
+
+.dig-arc {
+  padding: 5px 7px;
+  border-bottom: 1px dotted var(--border);
+  font-size: 11px;
+}
+.dig-arc .da-s  { color: var(--bright); }
+.dig-arc .da-p  { color: var(--muted); font-style: italic; padding: 0 4px; }
+.dig-arc .da-o  { color: var(--bright); }
+.dig-arc .da-c  { color: var(--muted); font-size: 10px; margin-left: 6px; }
+
+.dig-q {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  margin-bottom: 5px;
+  font-size: 11px;
+  display: flex; align-items: flex-start; gap: 6px;
+}
+.dig-q .dq-k {
+  font-size: 9px; letter-spacing: 0.1em;
+  padding: 1px 5px; border: 1px solid var(--border2);
+  color: var(--muted); text-transform: uppercase;
+}
+.dig-q.rec       { border-left: 2px solid var(--nul); }
+.dig-q.contested { border-left: 2px solid var(--sig); }
+.dig-q.absence   { border-left: 2px solid var(--border2); }
+
+.dig-theme {
+  display: flex; flex-wrap: wrap; gap: 3px;
+  margin-top: 6px;
+}
+.dig-theme-cell {
+  font-size: 9px; padding: 2px 5px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--surface);
+}
+.dig-theme-cell.hot {
+  color: var(--bright);
+  border-color: var(--sig);
+}
+
+.dig-logid {
+  font-size: 9px; color: var(--muted); opacity: 0.6;
+  font-family: 'JetBrains Mono', monospace;
+  margin-left: 6px; cursor: pointer;
+}
+.dig-logid:hover { color: var(--sig); opacity: 1; }
+
+/* ── Query-specific ── */
+
+.query-input-row {
+  display: flex; gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+#query-input {
+  flex: 1;
+  padding: 6px 9px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-family: inherit;
+  font-size: 12px;
+}
+#query-input:focus { outline: none; border-color: var(--sig); }
+
+.q-plan {
+  font-size: 10px; color: var(--muted);
+  padding: 5px 7px;
+  background: var(--surface);
+  border: 1px dotted var(--border);
+  margin-bottom: 10px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.q-cells {
+  display: flex; gap: 3px; margin-top: 4px; flex-wrap: wrap;
+}
+.q-answer {
+  margin-bottom: 12px;
+  padding: 8px; border: 1px solid var(--sig);
+  background: var(--surface);
+}
+.q-support {
+  padding: 6px 8px; border-bottom: 1px dotted var(--border);
+  font-size: 11px;
+  cursor: pointer;
+}
+.q-support:hover { background: var(--surface); }
+.q-support .qs-head {
+  display: flex; gap: 8px; font-size: 9px; color: var(--muted);
+  margin-bottom: 3px;
+}
+.q-support .qs-text {
+  color: var(--text); font-style: italic;
+}
+
+/* ── Pressure dots on cast cards ── */
+.dc-dot {
+  display: inline-block;
+  width: 7px; height: 7px; border-radius: 50%;
+  margin-right: 6px; vertical-align: middle;
+}
+.dc-dot.low  { background: #4e8f62; }
+.dc-dot.mid  { background: #c07028; }
+.dc-dot.hot  { background: #a33218; box-shadow: 0 0 6px rgba(163,50,24,0.6); }
+
+/* ── Inspector entity sheet ── */
+.insp-back {
+  font-size: 10px; color: var(--muted); cursor: pointer;
+  padding: 4px 6px; border: 1px solid var(--border);
+  display: inline-block; margin-bottom: 10px;
+  letter-spacing: 0.05em;
+}
+.insp-back:hover { color: var(--sig); border-color: var(--sig); }
+.insp-title {
+  font-size: 15px; font-weight: 500; color: var(--bright);
+  margin-bottom: 4px;
+}
+.insp-anchor {
+  font-size: 9px; color: var(--muted);
+  font-family: 'JetBrains Mono', monospace;
+  margin-bottom: 8px;
+}
+.insp-badge {
+  font-size: 9px; padding: 2px 6px;
+  border: 1px solid var(--border2);
+  color: var(--muted); letter-spacing: 0.06em;
+  text-transform: uppercase; margin-right: 4px;
+}
+.insp-badge.hub { border-color: var(--sig); color: var(--sig); }
+.insp-badge.hot { border-color: var(--nul); color: var(--nul); }
+.insp-frame {
+  padding: 8px 10px;
+  background: var(--surface);
+  border-left: 2px solid var(--border2);
+  font-style: italic; font-size: 12px;
+  margin: 8px 0 12px;
+  color: var(--text);
+}
+.insp-quote {
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: 'Spectral', serif;
+  font-size: 12px; color: var(--text);
+  line-height: 1.5;
+  cursor: pointer;
+  margin-bottom: 12px;
+}
+.insp-quote:hover { border-color: var(--sig); }
+.insp-rel {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 5px 0;
+  border-bottom: 1px dotted var(--border);
+  font-size: 11px;
+  cursor: pointer;
+}
+.insp-rel:hover { background: var(--surface); }
+.insp-rel-op {
+  font-size: 9px; padding: 1px 5px;
+  border: 1px solid var(--border2); color: var(--muted);
+  letter-spacing: 0.05em; flex-shrink: 0;
+}
+.insp-rel-text { flex: 1; color: var(--text); }
+.insp-rel-conf { font-size: 10px; color: var(--muted); flex-shrink: 0; }
+.insp-pbar-wrap { display: flex; align-items: center; gap: 8px; }
+.insp-pbar-track {
+  flex: 1; height: 4px;
+  background: var(--border);
+  border-radius: 2px; overflow: hidden;
+}
+.insp-pbar-fill {
+  height: 100%; transition: width 0.4s ease;
+}
+.insp-pbar-z {
+  font-size: 10px; color: var(--muted); flex-shrink: 0;
+}
+
+/* ── Retrieval trace footer ── */
+.q-trace {
+  padding: 7px 10px; margin-top: 8px;
+  font-size: 10px; color: var(--muted);
+  border-top: 1px dotted var(--border);
+  font-family: 'JetBrains Mono', monospace;
+}
+.q-trace em { color: var(--text); font-style: normal; }
+
 .pressure-empty {
   display: flex; align-items: center; justify-content: center;
   height: 100%; color: var(--muted); font-size: 12px;
@@ -993,6 +1300,8 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
       <div class="right-tabs">
         <div class="right-tab active" id="tab-log" onclick="switchRightTab('log')">LOG <span id="log-count" style="font-size:10px;opacity:0.6"></span></div>
         <div class="right-tab" id="tab-pressure" onclick="switchRightTab('pressure')">PRESSURE MAP <span id="pressure-count" style="font-size:10px;opacity:0.6"></span></div>
+        <div class="right-tab" id="tab-digest" onclick="switchRightTab('digest')">DIGEST <span id="digest-count" style="font-size:10px;opacity:0.6"></span></div>
+        <div class="right-tab" id="tab-query" onclick="switchRightTab('query')">QUERY</div>
       </div>
 
       <div class="gradient-legend" id="gradient-legend" style="display:none">
@@ -1073,6 +1382,44 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
       </div>
 
       <div class="pressure-map" id="pressure-map"><div class="pressure-empty"><div class="empty-glyph" style="font-size:24px;opacity:0.3">⊨</div><div>Process documents to see pressure map</div></div></div>
+
+      <!-- DIGEST: deterministic, provenance-linked summary. Every bullet
+           carries the log_id(s) it was assembled from. -->
+      <div class="digest-panel" id="digest-panel">
+        <div class="digest-toolbar">
+          <div class="digest-length">
+            <button class="dlen" data-len="tldr"     onclick="setDigestLength('tldr')">TL;DR</button>
+            <button class="dlen active" data-len="brief"    onclick="setDigestLength('brief')">Brief</button>
+            <button class="dlen" data-len="expanded" onclick="setDigestLength('expanded')">Expanded</button>
+          </div>
+          <div class="digest-scope" id="digest-scope">whole corpus</div>
+          <button class="dbtn" onclick="refreshDigest()">↻</button>
+        </div>
+        <div class="digest-body" id="digest-body">
+          <div class="digest-empty">
+            <div class="empty-glyph" style="font-size:24px;opacity:0.3">∑</div>
+            <div>Process documents to generate a digest</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- QUERY: free-text interface over the corpus, routed through
+           entity matching, centroid affinity, and span rerank. -->
+      <div class="query-panel" id="query-panel">
+        <div class="query-input-row">
+          <input type="text" id="query-input"
+                 placeholder='Ask: "what is X?" · "what did X say?" · "how is X related to Y?" · "the quiet parts"'
+                 onkeydown="if(event.key==='Enter')runQuery()">
+          <button class="dbtn" onclick="runQuery()">Ask</button>
+        </div>
+        <div class="query-body" id="query-body">
+          <div class="digest-empty">
+            <div class="empty-glyph" style="font-size:24px;opacity:0.3">?</div>
+            <div>Ask a question about the ingested corpus</div>
+          </div>
+        </div>
+      </div>
+
       <div class="status-bar">
         <span class="status-total" id="status-total">0 entries</span>
         <span id="status-ops"></span>
@@ -1508,6 +1855,10 @@ async function classifyChunk(text, script, positionHash, grain, mechanicalOp) {
 window.EOClassifier = {
   initClassifier, isReady, classifyClause, classifyClauses, classifyChunk,
   bakeCentroids, clearBakedCentroids, centroidsJSON,
+  // Exposed for the digest + query layer: same embedder, same centroids,
+  // so a user query lands in the same 384-dim space as the corpus.
+  embedText, cosine,
+  centroids: () => _centroids,
 };
 
 // Auto-init on load.
@@ -1532,6 +1883,12 @@ initClassifier('centroids.json').then((ready) => {
   if (status) status.textContent = '○ Classifier unavailable';
 });
 </script>
+
+<!-- Digest + Query modules — loaded after EOClassifier so they can call
+     embedText / cosine / centroids(). Both are pure main-thread scripts
+     that read state.combined + state.docs. -->
+<script src="workers/digest.js"></script>
+<script src="workers/query.js"></script>
 
 <script>
 // ═══════════════════════════════════════════════════════
@@ -4396,6 +4753,30 @@ function renderAll() {
   if (document.getElementById('pressure-map').classList.contains('visible')) {
     renderPressureMap();
   }
+  // Auto-refresh digest so its entity count + gist stay current in the tab
+  // header. Only runs when the digest panel is visible to avoid unnecessary
+  // work on every ingest.
+  try {
+    const digestPan = document.getElementById('digest-panel');
+    if (digestPan && digestPan.classList.contains('visible')) renderDigest();
+    // Update the entity count badge on the tab even when hidden
+    else if (typeof updateDigestBadge === 'function') updateDigestBadge();
+  } catch {}
+}
+
+function updateDigestBadge() {
+  const count = document.getElementById('digest-count');
+  if (!count || !state.combined || !window.EODigest) return;
+  try {
+    const d = window.EODigest.composeDigest({
+      combinedLog: state.combined,
+      docs: state.docs,
+      docAnchor: currentDocAnchor?.() || null,
+      pressure: (typeof workerBridge !== 'undefined' && workerBridge.pressure) || null,
+      length: 'tldr',
+    });
+    count.textContent = `(${d.entity_count})`;
+  } catch {}
 }
 
 function renderTabs() {
@@ -5470,23 +5851,538 @@ function switchRightTab(tab) {
   const legend     = document.getElementById('gradient-legend');
   const tabLog     = document.getElementById('tab-log');
   const tabPres    = document.getElementById('tab-pressure');
+  const tabDigest  = document.getElementById('tab-digest');
+  const tabQuery   = document.getElementById('tab-query');
+  const digestPan  = document.getElementById('digest-panel');
+  const queryPan   = document.getElementById('query-panel');
+
+  // Default: hide everything, then enable the selected view.
+  logList.classList.add('hidden');
+  if (triadGrid) triadGrid.style.display = 'none';
+  pressMap.classList.remove('visible');
+  legend.style.display = 'none';
+  if (digestPan) digestPan.classList.remove('visible');
+  if (queryPan)  queryPan.classList.remove('visible');
+  [tabLog, tabPres, tabDigest, tabQuery].forEach(t => t && t.classList.remove('active'));
 
   if (tab === 'log') {
     logList.classList.remove('hidden');
     if (triadGrid) triadGrid.style.display = '';
-    pressMap.classList.remove('visible');
-    legend.style.display = 'none';
     tabLog.classList.add('active');
-    tabPres.classList.remove('active');
-  } else {
-    logList.classList.add('hidden');
-    if (triadGrid) triadGrid.style.display = 'none';
+  } else if (tab === 'pressure') {
     pressMap.classList.add('visible');
     legend.style.display = 'flex';
-    tabLog.classList.remove('active');
     tabPres.classList.add('active');
     renderPressureMap();
+  } else if (tab === 'digest') {
+    if (digestPan) digestPan.classList.add('visible');
+    if (tabDigest) tabDigest.classList.add('active');
+    // If we were in inspector mode for another tab, re-render it; otherwise
+    // render the full digest.
+    if (_inspectAnchor) renderInspector(); else renderDigest();
+  } else if (tab === 'query') {
+    if (queryPan) queryPan.classList.add('visible');
+    if (tabQuery) tabQuery.classList.add('active');
+    const input = document.getElementById('query-input');
+    if (input) setTimeout(() => input.focus(), 0);
   }
+}
+
+// ═══════════════════════════════════════════════════════
+// DIGEST renderer — provenance-linked, deterministic summary
+// ═══════════════════════════════════════════════════════
+
+let _digestLength = 'brief';
+let _digestScope  = 'all';     // 'all' | doc_anchor string
+
+function setDigestLength(len) {
+  _digestLength = len;
+  document.querySelectorAll('.dlen').forEach(b =>
+    b.classList.toggle('active', b.dataset.len === len));
+  renderDigest();
+}
+
+function refreshDigest() { renderDigest(); }
+
+function currentDocAnchor() {
+  if (_digestScope !== 'all') return _digestScope;
+  const i = state.activeDoc;
+  if (i != null && state.docs[i]) return state.docs[i].doc_anchor;
+  return null;
+}
+
+function renderDigest() {
+  const body = document.getElementById('digest-body');
+  if (!body) return;
+  if (!state.combined || !state.combined.entries().length) {
+    body.innerHTML = `<div class="digest-empty">
+        <div class="empty-glyph" style="font-size:24px;opacity:0.3">∑</div>
+        <div>Process documents to generate a digest</div>
+      </div>`;
+    return;
+  }
+  if (!window.EODigest) {
+    body.innerHTML = `<div class="digest-empty">Digest module failed to load.</div>`;
+    return;
+  }
+  const docAnchor = currentDocAnchor();
+  const scope = docAnchor ? (state.docs.find(d => d.doc_anchor === docAnchor)?.title || 'doc') : 'all docs';
+  const scopeEl = document.getElementById('digest-scope');
+  if (scopeEl) scopeEl.textContent = `scope: ${scope}`;
+
+  let digest;
+  try {
+    digest = window.EODigest.composeDigest({
+      combinedLog: state.combined,
+      docs: state.docs,
+      docAnchor,
+      pressure: (typeof workerBridge !== 'undefined' && workerBridge.pressure) || null,
+      length: _digestLength,
+    });
+  } catch (err) {
+    console.error('digest compose failed', err);
+    body.innerHTML = `<div class="digest-empty">Digest error: ${escapeHtml(err.message || String(err))}</div>`;
+    return;
+  }
+
+  const count = document.getElementById('digest-count');
+  if (count) count.textContent = `(${digest.entity_count})`;
+
+  body.innerHTML = digestHTML(digest);
+}
+
+function digestHTML(d) {
+  const esc = (s) => escapeHtml(String(s ?? ''));
+
+  const gist = `
+    <div class="dig-gist">
+      ${esc(d.gist.line)}
+      <div class="dig-meta">
+        ${d.clause_count} clauses · ${d.entity_count} entities · ${d.edge_count} edges
+        ${d.theme.dominantMode ? '· mode: ' + esc(d.theme.dominantMode) : ''}
+      </div>
+    </div>`;
+
+  // Theme bar — top cells with normalised pills
+  const topCells = d.theme.topCells.slice(0, 12);
+  const maxN = Math.max(1, ...topCells.map(c => c.n));
+  const themeBar = topCells.length ? `
+    <div class="dig-section">
+      <div class="dig-h">Theme</div>
+      <div class="dig-theme">
+        ${topCells.map(c => {
+          const hot = c.n >= 0.6 * maxN;
+          return `<span class="dig-theme-cell ${hot ? 'hot' : ''}" title="${esc(c.cell_id)} · ${c.n}">${esc(c.cell_id)} ×${c.n}</span>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
+  // Cast
+  const cast = d.cast.length ? `
+    <div class="dig-section">
+      <div class="dig-h">Cast (${d.cast.length})</div>
+      ${d.cast.map(c => `
+        <div class="dig-card${c.eva_conflicts ? ' contested' : ''}"
+             style="cursor:pointer" onclick="inspectEntity('${esc(c.anchor)}')">
+          <div class="dc-name">
+            <span class="dc-dot ${pressureClass(c.pressure_z)}"></span>${esc(c.display_name)}
+            ${c.log_ids?.[0] ? `<span class="dig-logid" onclick="event.stopPropagation();jumpToLogId('${esc(c.log_ids[0])}')">#${esc(c.log_ids[0])}</span>` : ''}
+          </div>
+          ${c.frame ? `<div class="dc-frame">${esc(c.frame.value)}
+            <span class="dig-logid" onclick="jumpToLogId('${esc(c.frame.log_id)}')">#${esc(c.frame.log_id)}</span></div>` : ''}
+          ${c.edges.length ? `<div class="dc-edges">${c.edges.map(e => `
+            <span class="de">→ <em>${esc(e.predicate)}</em> ${esc(e.object_name)}
+              <span class="dig-logid" onclick="jumpToLogId('${esc(e.log_ids?.[0] || '')}')">#${esc(e.log_ids?.[0] || '')}</span>
+            </span>`).join('')}</div>` : ''}
+          ${c.quote ? `<div class="dc-quote" onclick="jumpToSpan(${c.quote.span_start},${c.quote.span_end},'${esc(c.quote.log_id)}')">
+            "${esc(c.quote.text.slice(0, 240))}${c.quote.text.length > 240 ? '…' : ''}"
+          </div>` : ''}
+          <div class="dc-stats">
+            <span>rank ${c.rank.toFixed(2)}</span>
+            <span>sig ×${c.sig_count}</span>
+            ${c.hub_degree ? `<span>hub ${c.hub_degree}</span>` : ''}
+            ${c.pressure_z != null ? `<span>pressure z=${c.pressure_z}</span>` : ''}
+            ${c.eva_conflicts ? `<span style="color:var(--nul)">conflicts ${c.eva_conflicts}</span>` : ''}
+          </div>
+        </div>
+      `).join('')}
+    </div>` : '';
+
+  // Arcs
+  const arcs = d.arcs.length ? `
+    <div class="dig-section">
+      <div class="dig-h">Story arcs (${d.arcs.length})</div>
+      ${d.arcs.map(a => `
+        <div class="dig-arc" style="cursor:pointer">
+          <span class="da-s" onclick="event.stopPropagation();inspectEntity('${esc(a.s)}')">${esc(a.s_name)}</span>
+          <span class="da-p">${esc(a.p)}</span>
+          <span class="da-o" onclick="event.stopPropagation();inspectEntity('${esc(a.o)}')">${esc(a.o_name)}</span>
+          <span class="da-c">conf ${a.confidence.toFixed(2)} · ×${a.count}</span>
+          ${a.log_ids?.[0] ? `<span class="dig-logid" onclick="event.stopPropagation();jumpToLogId('${esc(a.log_ids[0])}')">#${esc(a.log_ids[0])}</span>` : ''}
+        </div>
+      `).join('')}
+    </div>` : '';
+
+  // Open questions
+  const questions = d.open_questions.length ? `
+    <div class="dig-section">
+      <div class="dig-h">Open questions (${d.open_questions.length})</div>
+      ${d.open_questions.map(q => `
+        <div class="dig-q ${esc(q.kind)}">
+          <span class="dq-k">${esc(q.kind)}</span>
+          <span>
+            <strong>${esc(q.target_name)}</strong> — ${esc(q.note)}
+            ${(q.log_id ? [q.log_id] : q.log_ids || []).map(id =>
+              `<span class="dig-logid" onclick="jumpToLogId('${esc(id)}')">#${esc(id)}</span>`
+            ).join('')}
+          </span>
+        </div>
+      `).join('')}
+    </div>` : '';
+
+  return gist + themeBar + cast + arcs + questions;
+}
+
+function jumpToLogId(id) {
+  if (!id) return;
+  // Switch to LOG tab, scroll to the matching entry.
+  switchRightTab('log');
+  setTimeout(() => {
+    const el = document.querySelector(`[data-log-id="${id}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('highlight-pulse');
+      setTimeout(() => el.classList.remove('highlight-pulse'), 1500);
+    }
+  }, 50);
+}
+
+function jumpToSpan(start, end, logId) {
+  // Defer to existing span-click handler if present; otherwise fall back
+  // to jumping by log_id.
+  const span = document.querySelector(`.dspan[data-start="${start}"]`);
+  if (span && typeof span.click === 'function') { span.click(); return; }
+  jumpToLogId(logId);
+}
+
+// ── Doc-viewer highlight bridge ─────────────────────────────────
+// The doc-viewer is rendered with .anno[data-log-id=...] spans when OPFS
+// is live. We flip .anno-match on matching spans so the document itself
+// becomes the result surface for queries and inspector focus.
+let _highlightedLogIds = new Set();
+function highlightLogIds(ids) {
+  const set = new Set((ids || []).filter(Boolean));
+  // Unhighlight previously matched spans that aren't in the new set.
+  for (const el of document.querySelectorAll('.anno.anno-match')) {
+    const id = el.dataset.logId;
+    if (!set.has(id)) el.classList.remove('anno-match');
+  }
+  if (!set.size) return;
+  for (const id of set) {
+    document.querySelectorAll(`.anno[data-log-id="${id}"]`)
+      .forEach(el => el.classList.add('anno-match'));
+  }
+  _highlightedLogIds = set;
+  // Scroll the first match into view, softly.
+  const first = document.querySelector('.anno.anno-match');
+  if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function clearHighlights() { highlightLogIds([]); }
+
+// Highlight every anno whose data-anchor equals this entity's anchor.
+// Used when entering Inspector mode so the reader can see every mention.
+function highlightEntityAnchor(anchor) {
+  if (!anchor) { clearHighlights(); return; }
+  const matches = document.querySelectorAll(`.anno[data-anchor="${anchor}"]`);
+  for (const el of document.querySelectorAll('.anno.anno-match')) el.classList.remove('anno-match');
+  matches.forEach(el => el.classList.add('anno-match'));
+  const first = matches[0];
+  if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function pressureClass(z) {
+  if (z == null) return '';
+  if (z >= 1.2) return 'hot';
+  if (z >= 0.4) return 'mid';
+  return 'low';
+}
+function pressureColor(z) {
+  if (z == null) return 'var(--border2)';
+  if (z >= 1.2) return '#a33218';
+  if (z >= 0.4) return '#c07028';
+  return '#4e8f62';
+}
+
+// ═══════════════════════════════════════════════════════
+// INSPECTOR — per-entity sheet that replaces the digest body
+// when a cast/arc/clause is clicked. Back button returns.
+// ═══════════════════════════════════════════════════════
+
+let _inspectAnchor = null;
+
+function inspectEntity(anchor) {
+  if (!anchor || !state.combined) return;
+  _inspectAnchor = anchor;
+  // Make sure the right panel is on DIGEST so the inspector is visible.
+  const digestPan = document.getElementById('digest-panel');
+  if (digestPan && !digestPan.classList.contains('visible')) switchRightTab('digest');
+  // Highlight every mention of this entity in the doc.
+  highlightEntityAnchor(anchor);
+  renderInspector();
+}
+
+function exitInspector() {
+  _inspectAnchor = null;
+  clearHighlights();
+  renderDigest();
+}
+
+function renderInspector() {
+  const body = document.getElementById('digest-body');
+  if (!body || !_inspectAnchor || !state.combined) return;
+  const entries = state.combined.entries();
+  const anchor = _inspectAnchor;
+
+  // Collect everything we know about this anchor.
+  const displayName = resolveDisplayName(anchor);
+  const defFrame = entries.slice().reverse().find(e =>
+    e.op === 'DEF' && e.target === anchor && e.operand?.param === 'frame');
+  const ins = entries.find(e => e.op === 'INS' && e.anchor === anchor && e.target === 'entity-registry');
+  const sigs = entries.filter(e => e.op === 'SIG' && (e.target === anchor || e.anchor === anchor));
+
+  const conOut = entries.filter(e => e.op === 'CON' && e.target === anchor);
+  const conIn  = entries.filter(e => e.op === 'CON' && e.operand?.object_anchor === anchor);
+  const nuls   = entries.filter(e => e.op === 'NUL' && e.target === anchor);
+  const recs   = entries.filter(e => e.op === 'REC' && e.target === anchor);
+
+  const pressure = (typeof workerBridge !== 'undefined' && workerBridge.pressure?.[anchor]) || null;
+  const z = pressure?.z ?? null;
+
+  // Best-quote: use composeDigest's logic indirectly by pulling EVAs targeting
+  // clauses where this anchor was mentioned. Simpler here: find a CON entry
+  // with a span and show that clause text.
+  const doc = state.docs[state.activeDoc];
+  let quote = null;
+  const conWithSpan = conOut.find(e => e.provenance?.span_start != null) ||
+                      conIn.find(e => e.provenance?.span_start != null);
+  if (conWithSpan && doc?.text) {
+    const { span_start: s, span_end: e } = conWithSpan.provenance;
+    if (s != null && e != null && e <= doc.text.length) {
+      quote = { text: doc.text.slice(s, e).trim(), log_id: conWithSpan.log_id };
+    }
+  }
+
+  const esc = (x) => escapeHtml(String(x ?? ''));
+  const relHTML = (e) => {
+    const otherAnchor = e.target === anchor ? e.operand?.object_anchor : e.target;
+    const verb = e.operand?.verb || e.operand?.relation_type || 'related';
+    const conf = e.provenance?.confidence || 0.5;
+    const otherName = resolveDisplayName(otherAnchor) || otherAnchor?.slice(0, 12) || '?';
+    return `<div class="insp-rel" onclick="jumpToLogId('${esc(e.log_id)}')">
+      <span class="insp-rel-op">CON</span>
+      <span class="insp-rel-text">${e.target === anchor ? '→' : '←'}
+        <em>${esc(verb)}</em> ${esc(otherName)}</span>
+      <span class="insp-rel-conf">${Math.round(conf * 100)}%</span>
+    </div>`;
+  };
+
+  const badges = [
+    ins ? `<span class="insp-badge">INS ${esc(ins.ts?.slice(0,10) || '')}</span>` : '',
+    defFrame?.operand?.is_hub ? `<span class="insp-badge hub">HUB</span>` : '',
+    z != null && z >= 1.2 ? `<span class="insp-badge hot">HOT z=${z}</span>` : '',
+  ].filter(Boolean).join('');
+
+  const pPct = z == null ? 0 : Math.min(100, Math.round(Math.abs(z) / 2.5 * 100));
+  const pColor = pressureColor(z);
+
+  body.innerHTML = `
+    <div class="insp-back" onclick="exitInspector()">← back to digest</div>
+    <div class="insp-title">${esc(displayName)}</div>
+    <div class="insp-anchor">${esc(anchor)}</div>
+    <div>${badges}</div>
+    ${defFrame ? `<div class="insp-frame">${esc(defFrame.operand.value)}
+      <span class="dig-logid" onclick="event.stopPropagation();jumpToLogId('${esc(defFrame.log_id)}')">#${esc(defFrame.log_id)}</span></div>` : ''}
+    ${quote ? `<div class="insp-quote" onclick="jumpToLogId('${esc(quote.log_id)}')">"${esc(quote.text.slice(0, 320))}${quote.text.length > 320 ? '…' : ''}"</div>` : ''}
+
+    ${z != null ? `
+    <div class="dig-section">
+      <div class="dig-h" style="display:flex;justify-content:space-between">
+        <span>EVA pressure</span>
+        <span style="color:${pColor}">${z >= 0 ? '+' : ''}${z}σ</span>
+      </div>
+      <div class="insp-pbar-wrap">
+        <div class="insp-pbar-track"><div class="insp-pbar-fill" style="width:${pPct}%;background:${pColor}"></div></div>
+      </div>
+    </div>` : ''}
+
+    ${conOut.length ? `<div class="dig-section">
+      <div class="dig-h">Outgoing (${conOut.length})</div>
+      ${conOut.slice(0, 8).map(relHTML).join('')}
+    </div>` : ''}
+    ${conIn.length ? `<div class="dig-section">
+      <div class="dig-h">Incoming (${conIn.length})</div>
+      ${conIn.slice(0, 8).map(relHTML).join('')}
+    </div>` : ''}
+
+    ${nuls.length ? `<div class="dig-section">
+      <div class="dig-h">Absences (${nuls.length})</div>
+      ${nuls.map(n => `<div class="dig-q absence" onclick="jumpToLogId('${esc(n.log_id)}')">
+        <span class="dq-k">NUL</span>
+        <span>${esc(n.operand?.signal || n.operand?.absence_type || 'absence')}</span>
+      </div>`).join('')}
+    </div>` : ''}
+
+    ${recs.length ? `<div class="dig-section">
+      <div class="dig-h">Pending review (${recs.length})</div>
+      ${recs.map(r => `<div class="dig-q rec" onclick="jumpToLogId('${esc(r.log_id)}')">
+        <span class="dq-k">REC</span>
+        <span>${esc(r.operand?.note || r.operand?.trigger || 'human review requested')}</span>
+      </div>`).join('')}
+    </div>` : ''}
+
+    <div class="dig-section" style="color:var(--muted);font-size:10px">
+      ${sigs.length} SIG references · ${state.docs.filter(d => {
+        return state.combined.entries().some(e =>
+          e.op === 'INS' && e.anchor === anchor &&
+          e.provenance?.doc_anchor === d.doc_anchor);
+      }).length} doc(s)
+    </div>
+  `;
+}
+
+// ═══════════════════════════════════════════════════════
+// QUERY runner
+// ═══════════════════════════════════════════════════════
+
+async function runQuery() {
+  const input = document.getElementById('query-input');
+  const body  = document.getElementById('query-body');
+  if (!input || !body) return;
+  const q = input.value.trim();
+  if (!q) return;
+  if (!state.combined || !state.combined.entries().length) {
+    body.innerHTML = `<div class="digest-empty">No corpus yet — process documents first.</div>`;
+    return;
+  }
+  if (!window.EOQuery) {
+    body.innerHTML = `<div class="digest-empty">Query module failed to load.</div>`;
+    return;
+  }
+  body.innerHTML = `<div class="digest-empty"><div>Thinking…</div></div>`;
+
+  try {
+    const result = await window.EOQuery.answerQuery({
+      queryText: q,
+      combinedLog: state.combined,
+      docs: state.docs,
+      docAnchor: currentDocAnchor(),
+      pressure: (typeof workerBridge !== 'undefined' && workerBridge.pressure) || null,
+      limit: 8,
+    });
+    body.innerHTML = queryHTML(result);
+    // Light up every supporting clause in the document itself — the doc
+    // becomes the result surface, not a side list.
+    highlightLogIds((result.supporting || []).map(s => s.log_id));
+  } catch (err) {
+    console.error('query failed', err);
+    body.innerHTML = `<div class="digest-empty">Query error: ${escapeHtml(err.message || String(err))}</div>`;
+  }
+}
+
+function queryHTML(r) {
+  const esc = (s) => escapeHtml(String(s ?? ''));
+
+  const plan = `
+    <div class="q-plan">
+      intent: <strong>${esc(r.plan.question_type)}</strong>
+      ${r.plan.entities?.length ? `· entities: ${r.plan.entities.map(e => esc(e.name)).join(', ')}` : ''}
+      ${r.plan.top_cells?.length ? `<div class="q-cells">${r.plan.top_cells.map(c => `<span class="dig-theme-cell hot">${esc(c)}</span>`).join('')}</div>` : ''}
+      ${r.cell_affinity?.length ? `<div style="margin-top:3px;opacity:0.7">top centroid: ${esc(r.cell_affinity[0].cell_id)} (cos=${r.cell_affinity[0].score.toFixed(3)})</div>` : ''}
+    </div>`;
+
+  let answer = '';
+  if (r.answer.bullets.length) {
+    answer = `<div class="q-answer"><div class="dig-h">Answer</div>` +
+      r.answer.bullets.map(b => renderQueryBullet(b, esc)).join('') +
+      `</div>`;
+  } else {
+    answer = `<div class="q-answer"><div class="dig-h">Answer</div>
+      <div style="color:var(--muted);font-size:11px">No structured answer route matched — see supporting clauses below.</div></div>`;
+  }
+
+  const support = r.supporting.length ? `
+    <div class="dig-section">
+      <div class="dig-h">Supporting clauses (${r.supporting.length})</div>
+      ${r.supporting.map(s => `
+        <div class="q-support" onclick="highlightLogIds(['${esc(s.log_id)}']);jumpToLogId('${esc(s.log_id)}')">
+          <div class="qs-head">
+            <span>${esc(s.cell_id || '?')}</span>
+            <span>score ${s.score.toFixed(2)}</span>
+            <span>conf ${(s.confidence || 0).toFixed(2)}</span>
+            ${s.agreement === false ? '<span style="color:var(--nul)">⚠ conflict</span>' : ''}
+            <span style="margin-left:auto" class="dig-logid">#${esc(s.log_id)}</span>
+          </div>
+          <div class="qs-text">"${esc(s.span.text.slice(0, 220))}${s.span.text.length > 220 ? '…' : ''}"</div>
+        </div>
+      `).join('')}
+    </div>` : `<div class="digest-empty" style="padding:16px">No supporting clauses matched.</div>`;
+
+  // Falsifiability footer — reinforces that this is retrieval, not generation.
+  const routes = [];
+  if (r.plan.entities?.length) routes.push('entity-name match');
+  if (r.plan.top_cells?.length) routes.push('centroid affinity');
+  if (r.plan.steps?.some(s => s.step === 'path_search')) routes.push('CON path search');
+  routes.push('token+cell rerank');
+  const trace = `<div class="q-trace">retrieval: ${routes.map(x => `<em>${esc(x)}</em>`).join(' + ')} — no generative model · ${r.supporting.length} clauses cited</div>`;
+
+  return plan + answer + support + trace;
+}
+
+function renderQueryBullet(b, esc) {
+  if (b.kind === 'definition') {
+    return `<div style="margin-bottom:6px">
+      <strong>${esc(b.subject)}</strong>
+      ${b.frame ? ` — <em>${esc(b.frame)}</em>` : ''}
+      ${b.frame_log_id ? `<span class="dig-logid" onclick="jumpToLogId('${esc(b.frame_log_id)}')">#${esc(b.frame_log_id)}</span>` : ''}
+      ${b.edges_out?.length ? `<div style="margin-top:4px;font-size:11px;color:var(--muted)">
+        ${b.edges_out.map(e => `→ <em>${esc(e.predicate)}</em> ${esc(e.object)}
+          <span class="dig-logid" onclick="jumpToLogId('${esc(e.log_id)}')">#${esc(e.log_id)}</span>`).join(' · ')}
+      </div>` : ''}
+    </div>`;
+  }
+  if (b.kind === 'path') {
+    return `<div style="margin-bottom:6px">
+      <strong>${esc(b.from)}</strong> → <strong>${esc(b.to)}</strong>
+      <div style="margin-top:4px;font-size:11px">
+        ${b.hops.map(h => `<span class="da-s">${esc(h.s)}</span>
+          <span class="da-p">${esc(h.predicate)}</span>
+          <span class="da-o">${esc(h.o)}</span>
+          <span class="da-c">(${h.confidence.toFixed(2)})</span>`).join(' · ')}
+      </div>
+    </div>`;
+  }
+  if (b.kind === 'contested') {
+    return `<div style="margin-bottom:6px">
+      <strong>${esc(b.subject)}</strong> — ${b.count} conflicting classification(s)
+      ${b.log_ids.map(id => `<span class="dig-logid" onclick="jumpToLogId('${esc(id)}')">#${esc(id)}</span>`).join(' ')}
+    </div>`;
+  }
+  if (b.kind === 'rec') {
+    return `<div style="margin-bottom:6px">
+      ⊛ <strong>${esc(b.subject)}</strong> — ${esc(b.note)}
+      <span class="dig-logid" onclick="jumpToLogId('${esc(b.log_id)}')">#${esc(b.log_id)}</span>
+    </div>`;
+  }
+  if (b.kind === 'absence') {
+    return `<div style="margin-bottom:6px">
+      ∅ <strong>${esc(b.subject)}</strong> — absent: ${esc(b.signals.join(', '))}
+      ${b.log_ids.map(id => `<span class="dig-logid" onclick="jumpToLogId('${esc(id)}')">#${esc(id)}</span>`).join(' ')}
+    </div>`;
+  }
+  if (b.kind === 'digest') {
+    return `<div>${digestHTML(b.digest)}</div>`;
+  }
+  return `<div style="color:var(--muted)">Unknown bullet kind: ${esc(b.kind)}</div>`;
 }
 
 
