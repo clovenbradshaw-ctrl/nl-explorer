@@ -1145,8 +1145,17 @@ async function cacheFlush() {
   } catch (e) { console.warn('OPFS flush failed:', e); }
 }
 
-function hashKey(script, text) {
-  const s = (script || '?') + '|' + CACHE_VERSION + '|' + text;
+// Cache key carries (script, text, positionHash, grain).
+// Empty positionHash + empty grain reproduces the legacy format so existing
+// OPFS cache entries survive the migration. Focus-driven reads always
+// provide both and therefore create a disjoint key space — a chunk read
+// "from nowhere" (ingest-style) and the same chunk read "from position P
+// at grain G" are different entries, honestly.
+function hashKey(script, text, positionHash, grain) {
+  let s = (script || '?') + '|' + CACHE_VERSION + '|' + text;
+  if (positionHash || grain) {
+    s += '|' + (positionHash || '') + '|' + (grain || '');
+  }
   let h1 = 0x811c9dc5, h2 = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
@@ -1467,9 +1476,37 @@ function centroidsJSON() {
   return _centroids ? JSON.stringify(_centroids) : null;
 }
 
+// ── Focus-hook classifier: single-chunk, cache keyed by (text, position, grain)
+// Used by readOnFocus — the act of reading. Unlike classifyClauses this is
+// deliberately unbatched; the latency IS the reading.
+async function classifyChunk(text, script, positionHash, grain, mechanicalOp) {
+  if (!_ready) throw new Error('Classifier not initialized');
+  const key = hashKey(script, text, positionHash || '', grain || '');
+  const cached = _cacheIndex?.get(key);
+  if (cached) {
+    const mech = mechanicalOp || null;
+    return {
+      ...cached,
+      mechanical_operator: mech,
+      agreement: mech ? mech === cached.operator : null,
+      cache_hit: true,
+    };
+  }
+  const r = await classifyClause(text, script, mechanicalOp);
+  const cacheable = { ...r };
+  delete cacheable.mechanical_operator;
+  delete cacheable.agreement;
+  _cacheIndex?.set(key, cacheable);
+  _cacheDirty++;
+  // Flush on a light cadence — single chunks are too small to batch into
+  // a barrier, but skipping flush leaks cache if the tab is closed.
+  if (_cacheDirty >= 8) await cacheFlush();
+  return { ...r, cache_hit: false };
+}
+
 // Expose API on window for the non-module script block
 window.EOClassifier = {
-  initClassifier, isReady, classifyClause, classifyClauses,
+  initClassifier, isReady, classifyClause, classifyClauses, classifyChunk,
   bakeCentroids, clearBakedCentroids, centroidsJSON,
 };
 
@@ -1520,6 +1557,69 @@ let _currentScript = 'latin';
 function now_ts() {
   return new Date().toISOString();
 }
+
+// ═══════════════════════════════════════════════════════
+// POSITION & DEPTH — observer state
+// ═══════════════════════════════════════════════════════
+// Position = recency-weighted active anchor set (§5 of plan). Only
+// click-selected targets push onto the stack; depth-driven reads on the
+// same target do not. The hash is stable across permutations (sorted) so
+// the same set produces the same cache key regardless of click order.
+const _position = {
+  stack: [],                 // [{anchor, ts}]
+  k: 8,                      // ring size
+  push(anchor) {
+    if (!anchor) return;
+    const ts = Date.now();
+    this.stack = this.stack.filter(e => e.anchor !== anchor);
+    this.stack.push({ anchor, ts });
+    if (this.stack.length > this.k) this.stack.shift();
+  },
+  anchors() { return this.stack.map(e => e.anchor); },
+  clear() { this.stack.length = 0; },
+};
+
+function positionHash() {
+  const a = _position.anchors().slice().sort();
+  if (!a.length) return '0';
+  let h1 = 0x811c9dc5;
+  const s = a.join('|');
+  for (let i = 0; i < s.length; i++) {
+    h1 ^= s.charCodeAt(i);
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+  }
+  return h1.toString(16);
+}
+
+// Depth controller — the regulator between target and reader.
+// `value` is a continuous scalar; `grain` is its quantization onto the
+// seven-grain ladder. Dwell/scroll/pressure feed `value`; readOnFocus
+// fires when `grain` crosses a boundary and no INS exists for
+// (target, grain, positionHash).
+const GRAIN_LADDER = ['token','clause','sentence','paragraph','section','document','cluster'];
+const _depth = {
+  target: null,              // { anchor, kind } — the pinned target
+  value: 0,
+  grain: 'token',
+  dwellStart: 0,
+  lastReadGrain: null,
+  pressureBoost: 0,
+  dwellTimer: null,
+  reset(target) {
+    this.target = target || null;
+    this.value = 0;
+    this.grain = 'token';
+    this.dwellStart = target ? Date.now() : 0;
+    this.lastReadGrain = null;
+    this.pressureBoost = 0;
+  },
+  quantize() {
+    // Thresholds (tunable). One unit ≈ one grain step.
+    const v = Math.max(0, this.value + this.pressureBoost);
+    const idx = Math.min(GRAIN_LADDER.length - 1, Math.floor(v));
+    return GRAIN_LADDER[idx];
+  },
+};
 
 // ── Sentence segmentation ─────────────────────────────
 
@@ -2932,6 +3032,22 @@ function stageEmbeddingLoop(combinedLog) {
   stageREC_embedding(combinedLog);
 }
 
+// Debounced G-triggered reducer. Call this from readOnFocus after emitting
+// a `focus:read` EVA (or from anywhere that lands new embedding evidence
+// into the combined log). Ingest does not call this anymore — pressure and
+// REC candidates grow only where the investigator has actually read.
+let _embeddingLoopTimer = null;
+function queueEmbeddingLoop(combinedLog, delayMs = 150) {
+  if (_embeddingLoopTimer) clearTimeout(_embeddingLoopTimer);
+  _embeddingLoopTimer = setTimeout(() => {
+    _embeddingLoopTimer = null;
+    try { stageEmbeddingLoop(combinedLog); }
+    catch (e) { console.error('queueEmbeddingLoop failed', e); }
+    // Opportunistic re-render of any views that depend on pressure.
+    try { if (typeof renderAll === 'function') renderAll(); } catch {}
+  }, delayMs);
+}
+
 async function ingest(text, title, source, log) {
   if (!log) log = new OperatorLog();
   // Yield to the event loop between stages so the UI can repaint and show
@@ -2998,9 +3114,11 @@ async function ingest(text, title, source, log) {
   stageFrameDEF(log, entityAnchors, da);
   await yieldTick();
 
-  // 9b. EVA (embedding) — per-clause nearest-centroid classification
-  setStage('EVA · embeddings');
-  await stageEmbeddingClassify(log, da);
+  // 9b. EVA (embedding) — REMOVED from ingest.
+  // Reading is a focus-driven act now (see readOnFocus). Ingest stops at
+  // the mechanical tier; embeddings fire only when the investigator
+  // actually looks at a chunk. This preserves the Anti-Omniscience Axiom:
+  // the system does not pre-comprehend the corpus from a god's-eye view.
 
   // 10. EVA (temporal) — data collection pass: date-anchored assertions
   setStage('EVA · temporal');
@@ -3013,6 +3131,364 @@ async function ingest(text, title, source, log) {
 
   return { log, doc_anchor: da };
 }
+
+// ═══════════════════════════════════════════════════════
+// READ ON FOCUS — the act of reading
+// ═══════════════════════════════════════════════════════
+// Embedding is the moment a chunk crosses from G (noticed) into M
+// (comprehended). readOnFocus is the universal reader. It is invoked by
+// the depth controller when a grain threshold is crossed, and by the
+// inspector's `read now` / `re-read ↻` override buttons. Raw clicks do
+// NOT fire this — see selectTarget().
+
+// Assemble the chunk text for a target at a given grain. Returns null if
+// the grain is not representable for this target (caller skips).
+function assembleChunk(target, grain) {
+  if (!target || !state.combined) return null;
+  const anc = target.anchor;
+  const entries = state.combined.entries();
+
+  // Prefer a SEG entry for this anchor — it carries normalized clause /
+  // sentence / doc text plus span coords.
+  const seg = entries.find(e => e.op === 'SEG' && e.anchor === anc);
+
+  if (grain === 'clause' || grain === 'sentence' || grain === 'token') {
+    if (seg?.operand?.text) return seg.operand.text;
+  }
+
+  // Document grain: if the target IS a doc anchor, use title + first
+  // ~3 sentences of that doc.
+  if (grain === 'document') {
+    const doc = state.docs.find(d => d.doc_anchor === anc);
+    if (doc) {
+      const head = (doc.text || '').slice(0, 1200);
+      return (doc.title ? doc.title + '. ' : '') + head;
+    }
+  }
+
+  // Paragraph / section grain: slice the source doc at the SEG's span.
+  // For paragraph, widen to the surrounding blank-line boundary. For
+  // section, widen to the nearest heading above. Both fall through to
+  // the raw SEG text if we cannot locate the doc surface.
+  if ((grain === 'paragraph' || grain === 'section') && seg) {
+    const da = seg.provenance?.doc_anchor;
+    const doc = state.docs.find(d => d.doc_anchor === da);
+    const txt = doc?.text;
+    const s = seg.provenance?.span_start, e = seg.provenance?.span_end;
+    if (txt && typeof s === 'number' && typeof e === 'number') {
+      if (grain === 'paragraph') {
+        // expand to nearest blank-line boundary on each side
+        let start = s;
+        while (start > 0 && !(txt[start-1] === '\n' && txt[start-2] === '\n')) start--;
+        let end = e;
+        while (end < txt.length && !(txt[end] === '\n' && txt[end+1] === '\n')) end++;
+        return txt.slice(start, end).trim();
+      } else {
+        // section — nearest heading above (Markdown # / ## / ALL CAPS line)
+        let start = s;
+        const isHeadingStart = (p) => {
+          if (p === 0) return true;
+          const lineStart = txt.lastIndexOf('\n', p - 1) + 1;
+          const line = txt.slice(lineStart, txt.indexOf('\n', lineStart));
+          return /^(#{1,6}\s|§\s|[A-Z][A-Z0-9 \-]{4,}$)/.test(line);
+        };
+        while (start > 0 && !isHeadingStart(start)) {
+          start = txt.lastIndexOf('\n', start - 1);
+          if (start < 0) { start = 0; break; }
+        }
+        return txt.slice(start, e + 400).trim(); // cap section length
+      }
+    }
+  }
+
+  // Cluster / entity grain: canonical name + surface forms + DEF params.
+  if (grain === 'cluster') {
+    const ent = (typeof ENT !== 'undefined' && Array.isArray(ENT))
+      ? ENT.find(x => x._anchor === anc || x.id === anc)
+      : null;
+    if (ent) {
+      const parts = [ent.name || ent.canonical || ''];
+      if (ent.desc) parts.push(ent.desc);
+      const surfaces = new Set();
+      for (const e of entries) {
+        if (e.op === 'DEF' && e.target === anc && e.operand?.param === 'surface_form' && e.operand?.value) {
+          surfaces.add(String(e.operand.value));
+        }
+      }
+      if (surfaces.size) parts.push('aka: ' + [...surfaces].slice(0, 6).join(', '));
+      return parts.filter(Boolean).join('. ');
+    }
+  }
+
+  // Fallback: if a SEG entry exists at all, return its text.
+  return seg?.operand?.text || null;
+}
+
+// Look up the most recent prior INS for (anchor, grain) regardless of position.
+function priorReadAt(target, grain) {
+  if (!state.combined) return null;
+  const entries = state.combined.entries();
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.op === 'INS'
+        && e.target === target.anchor
+        && e.provenance?.source === 'focus:read'
+        && e.provenance?.grain === grain) {
+      return e;
+    }
+  }
+  return null;
+}
+
+async function readOnFocus(target, grain, { overrideOrigin = null } = {}) {
+  if (!target || !target.anchor) return null;
+  if (!window.EOClassifier?.isReady?.()) return null;
+
+  const chunkText = assembleChunk(target, grain);
+  if (!chunkText || chunkText.length < 2) return null;
+
+  const posHash = positionHash();
+  const prior = priorReadAt(target, grain);
+  const isReread = !!(prior && prior.provenance?.position_hash !== posHash);
+
+  let result;
+  try {
+    result = await window.EOClassifier.classifyChunk(
+      chunkText, _currentScript, posHash, grain, null
+    );
+  } catch (err) {
+    console.error('readOnFocus: classifyChunk failed', err);
+    return null;
+  }
+
+  const log = state.combined;
+  if (!log) return result;
+
+  // INS — the chunk is instantiated as a particular at this grain, from
+  // this position. If an identical (anchor, grain, position_hash) INS
+  // already exists, skip the push (cache_hit implies we already recorded).
+  const insAnchor = anchor('ins:focus:' + target.anchor + ':' + grain + ':' + posHash);
+  const already = log.entries().some(e => e.op === 'INS' && e.anchor === insAnchor);
+  if (!already) {
+    log.push(makeEntry('INS', insAnchor, target.anchor, {
+      kind: target.kind || 'span',
+      grain,
+      chunk_length: chunkText.length,
+      cell_id: result.cell_id, operator: result.operator,
+      cache_hit: !!result.cache_hit,
+    }, {
+      source: 'focus:read',
+      position_hash: posHash,
+      position: _position.anchors().slice(),
+      grain,
+      script: _currentScript,
+      origin: overrideOrigin || (isReread ? 'reread' : 'dwell'),
+      confidence: Math.min(0.4 + result.confidence_gap * 4, 0.95),
+    }));
+  }
+
+  // EVA — identical schema to the old ingest-time classification entry,
+  // so downstream pressure / REC / domain-adapter code keeps working.
+  const evaAnchor = anchor('eva:emb:focus:' + target.anchor + ':' + grain + ':' + posHash);
+  const existingEva = log.entries().some(e => e.op === 'EVA' && e.anchor === evaAnchor);
+  if (!existingEva) {
+    log.push(makeEntry('EVA', evaAnchor, target.anchor, {
+      eva_type: 'embedding_classification',
+      cell_id: result.cell_id, cell_key: result.cell_key,
+      operator: result.operator, site: result.site, resolution: result.resolution,
+      mode: result.mode, domain: result.domain,
+      confidence_gap: result.confidence_gap,
+      similarity_profile: result.similarity_profile,
+      mechanical_operator: result.mechanical_operator,
+      agreement: result.agreement, flags: result.flags,
+      notation: `${result.operator}(${result.site}, ${result.resolution})`,
+      grain,
+    }, {
+      source: 'focus:read',
+      position_hash: posHash,
+      grain,
+      script: _currentScript,
+      model_version: 'all-MiniLM-L6-v2',
+      centroid_version: 'v1.0',
+      confidence: Math.min(0.4 + result.confidence_gap * 4, 0.95),
+    }));
+  }
+
+  // Re-read provenance: link the new INS to the prior INS from a
+  // different position. Preserves the sequence of readings for the same
+  // chunk — neither is canonical (§6).
+  if (isReread && !already) {
+    log.push(makeEntry('DEF', anchor('def:reread:' + insAnchor), insAnchor, {
+      param: 'reread_from_position',
+      value: prior.anchor,
+      prior_position_hash: prior.provenance?.position_hash || null,
+      note: 'same chunk read from a different attentional context',
+    }, {
+      source: 'focus:read',
+      position_hash: posHash,
+      grain,
+    }));
+  }
+
+  // Schedule pressure / REC reducer.
+  queueEmbeddingLoop(log);
+
+  return { result, insAnchor, evaAnchor, isReread };
+}
+
+// Click dispatcher — selects a target without reading it. `click = SIG`.
+// Reading is driven by the depth controller (§3) and by the inspector's
+// read-now override. Implemented in the same script block so click
+// handlers elsewhere can call it directly.
+function selectTarget(target) {
+  if (!target || !target.anchor) return;
+  _position.push(target.anchor);
+  _depth.reset(target);
+
+  // Emit a lightweight SIG entry — episodic trace, zero embedding cost.
+  // Using SIG (not INS) because the chunk has been noticed but not read.
+  if (state.combined) {
+    const sigAnchor = anchor('sig:focus:' + target.anchor + ':' + Date.now());
+    state.combined.push(makeEntry('SIG', sigAnchor, target.anchor, {
+      sig_type: 'focus_select',
+      kind: target.kind || 'span',
+    }, {
+      source: 'focus:sig',
+      position_hash: positionHash(),
+      confidence: 0.5,
+    }));
+  }
+
+  // UI hook — inspector / comprehension-map re-render.
+  try { if (typeof renderFocusInspector === 'function') renderFocusInspector(target); } catch {}
+  try { if (typeof renderComprehensionMap === 'function') renderComprehensionMap(); } catch {}
+}
+
+// ═══════════════════════════════════════════════════════
+// DEPTH CONTROLLER — regulator between target and reader
+// ═══════════════════════════════════════════════════════
+// Dwell monotonically raises value; scroll translates wheel to delta;
+// EVA pressure adds a surprise boost. Whenever quantized grain crosses
+// a boundary and the (target, grain, positionHash) tuple is unread,
+// fires readOnFocus for that grain. Shallower transitions never un-read —
+// reads are monotonic in G; only rendering tracks depth.
+
+const DEPTH_TICK_MS = 200;
+const DEPTH_DWELL_STEP = 0.05;      // ≈ 20 ticks/grain → ~4s between grains
+const DEPTH_SCROLL_STEP = 0.003;    // wheel delta → depth delta
+const DEPTH_PRESSURE_MULT = 0.3;    // z=3 → +0.9 boost
+
+function _depthPressureFor(anchor) {
+  // Best-effort read from the explorer-side pressure map; fold-worker's
+  // M.pressure is the source of truth but lives in the worker. The
+  // Explorer presentation layer mirrors the relevant bits into GNODES /
+  // ENT; hook either if present.
+  try {
+    if (typeof ENT !== 'undefined' && Array.isArray(ENT)) {
+      const ent = ENT.find(e => e._anchor === anchor || e.id === anchor);
+      if (ent && typeof ent.pressure_z === 'number') return ent.pressure_z;
+    }
+  } catch {}
+  // Derive a cheap proxy from state.combined: count of EVA conflicts on
+  // this anchor. Better than nothing when M isn't mirrored.
+  if (state.combined) {
+    let conflicts = 0;
+    for (const e of state.combined.entries()) {
+      if (e.target === anchor && e.op === 'EVA' && e.operand?.result === 'conflicts') conflicts++;
+    }
+    if (conflicts >= 2) return Math.min(3, conflicts * 0.7);
+  }
+  return 0;
+}
+
+async function _depthMaybeFireRead() {
+  if (!_depth.target) return;
+  const g = _depth.quantize();
+  if (g === _depth.grain && _depth.lastReadGrain === g) return;
+  _depth.grain = g;
+
+  // Only embed if we haven't already read this (target, grain) at the
+  // current position. priorReadAt() ignores position; extend by adding
+  // the position check here.
+  const already = (state.combined?.entries() || []).some(e =>
+    e.op === 'INS'
+    && e.target === _depth.target.anchor
+    && e.provenance?.source === 'focus:read'
+    && e.provenance?.grain === g
+    && e.provenance?.position_hash === positionHash()
+  );
+  if (already) {
+    _depth.lastReadGrain = g;
+    _notifyDepth();
+    return;
+  }
+
+  _depth.lastReadGrain = g;
+  _notifyDepth();
+
+  // Skip token grain reads — too noisy and rarely useful; the SIG event
+  // from selectTarget() already records the notice. Start embedding at
+  // clause and deeper.
+  if (g === 'token') return;
+
+  const out = await readOnFocus(_depth.target, g);
+  if (out) {
+    try { if (typeof renderFocusInspector === 'function') renderFocusInspector(_depth.target); } catch {}
+    try { if (typeof renderComprehensionMap === 'function') renderComprehensionMap(); } catch {}
+  }
+}
+
+function _notifyDepth() {
+  try { if (typeof onDepthChange === 'function') onDepthChange(_depth); } catch {}
+}
+
+// Dwell tick — raises value while a target is pinned and this window has
+// focus. Pressure is re-sampled every tick so surprise can deepen reading
+// mid-dwell.
+setInterval(() => {
+  if (!_depth.target) return;
+  if (typeof document !== 'undefined' && document.hidden) return;
+  // Ease-in on dwell: slower early, faster the longer you look.
+  const dwellMs = Date.now() - (_depth.dwellStart || Date.now());
+  const ease = Math.min(1, dwellMs / 3000); // 0 → 1 over ~3s
+  _depth.value += DEPTH_DWELL_STEP * (0.4 + 0.6 * ease);
+
+  const z = _depthPressureFor(_depth.target.anchor);
+  _depth.pressureBoost = Math.max(0, z) * DEPTH_PRESSURE_MULT;
+
+  _depthMaybeFireRead();
+}, DEPTH_TICK_MS);
+
+// Scroll-as-zoom: wheel events on the doc area translate to depth delta
+// when a target is pinned. Positive deltaY = scroll down / lean in =
+// deeper. Modifier keys are respected (Ctrl-wheel still zooms the page).
+function installDepthScrollHandler() {
+  const area = document.querySelector('.doc-area') || document.getElementById('doc-viewer');
+  if (!area || area.__depthInstalled) return;
+  area.__depthInstalled = true;
+  area.addEventListener('wheel', (ev) => {
+    if (!_depth.target) return;
+    if (ev.ctrlKey || ev.metaKey) return;
+    _depth.value += ev.deltaY * DEPTH_SCROLL_STEP;
+    if (_depth.value < 0) _depth.value = 0;
+    // Extend ladder: scrolling past document-grain initiates the
+    // graph-surface transition (handled in Stage 10).
+    _depthMaybeFireRead();
+  }, { passive: true });
+}
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', installDepthScrollHandler);
+  } else {
+    installDepthScrollHandler();
+  }
+}
+
+// Expose for external callers (inspector buttons, tests).
+window.readOnFocus = readOnFocus;
+window.selectTarget = selectTarget;
+window._position = _position;
+window._depth = _depth;
 
 // ═══════════════════════════════════════════════════════
 // STATE
@@ -3838,8 +4314,18 @@ function runIngest() {
     stageSIM_candidates(state.combined, state.docs.map(d => d.log));
     // REC: fires when irresolvable superposition detected in combined log
     stageREC_superposition(state.combined);
-    // Phase 3 — DEF → EVA → REC loop on embedding evidence
-    stageEmbeddingLoop(state.combined);
+    // Phase 3 — DEF → EVA → REC loop on embedding evidence.
+    // No longer runs at ingest: pressure and REC candidates grow over time
+    // as the investigator reads. queueEmbeddingLoop() is called from
+    // readOnFocus after each focus:read EVA lands in the combined log.
+    // If any focus-reads have already accumulated (e.g. on re-ingest of a
+    // partially-read session), run once synchronously here so existing
+    // pressure is visible immediately.
+    if (state.combined.entries().some(e =>
+      e.op === 'EVA' && e.operand?.eva_type === 'embedding_classification'
+    )) {
+      stageEmbeddingLoop(state.combined);
+    }
 
     // Detach the live subscriber — full renderAll below supersedes it.
     liveLog.subscribe(null);
@@ -3967,6 +4453,16 @@ function wireDocViewerClicks() {
       row.classList.add('log-entry-active');
       row.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
+    // click = SIG: establish the target, open the inspector, let the depth
+    // controller handle reads. The target is the SEG/SIG anchor for the
+    // clicked span (preferred over the log entry's own anchor because
+    // spans are the structural unit; log entries are the event that
+    // produced them).
+    const entry = entries[idx];
+    const targetAnchor = entry?.anchor;
+    if (targetAnchor) {
+      try { selectTarget({ anchor: targetAnchor, kind: 'span', logId, idx }); } catch {}
+    }
   });
 }
 
@@ -4033,9 +4529,11 @@ function renderEntry(e, idx) {
     ? `data-entity-anchor="${e.anchor}"` : '';
   const detectorAttr = e.operand?.detector ? `data-detector="${e.operand.detector}"` : '';
   return `<div class="log-entry op-${op}" data-op="${op}" data-idx="${idx}"
+              data-anchor="${e.anchor}"
               data-span-start="${e.provenance?.span_start ?? ''}"
               data-span-end="${e.provenance?.span_end ?? ''}"
               ${entityAttr} ${detectorAttr}
+              onclick="selectTargetFromEntry(this)"
               onmouseenter="hoverEntry(this)" onmouseleave="unhoverEntry()">
     <div class="entry-op">
       <div class="op-badge">${op}</div>
@@ -4049,6 +4547,19 @@ function renderEntry(e, idx) {
     </div>
   </div>`;
 }
+
+// Click handler for operator-log rows. Calls selectTarget with the entry
+// anchor as the pinned target. Safe on every op type — readOnFocus and
+// assembleChunk degrade gracefully for anchors without span text.
+function selectTargetFromEntry(row) {
+  const anc = row?.dataset?.anchor;
+  if (!anc) return;
+  document.querySelectorAll('.log-entry.log-entry-active')
+    .forEach(r => r.classList.remove('log-entry-active'));
+  row.classList.add('log-entry-active');
+  try { selectTarget({ anchor: anc, kind: 'logEntry', op: row.dataset.op }); } catch {}
+}
+if (typeof window !== 'undefined') window.selectTargetFromEntry = selectTargetFromEntry;
 
 function entryMainText(e) {
   const op = e.op;
@@ -5994,6 +6505,13 @@ function sSpan(spanId){
 function sEnt(entId){
   actEnt=entId;
   const en=entOf(entId);if(!en)return;
+  // click = SIG: entities are cluster-grain targets. Prefer the canonical
+  // anchor if present, else the id itself.
+  try {
+    if (typeof window.selectTarget === 'function') {
+      window.selectTarget({ anchor: en._anchor || en.id, kind: 'entity' });
+    }
+  } catch {}
   document.getElementById('hdr-sel').textContent=en.name;
   // Find first span for entity
   const spans=entitySpans(entId);
