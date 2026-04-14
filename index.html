@@ -243,6 +243,68 @@ button:hover { border-color: var(--sig); color: var(--sig); }
 .btn-process:hover { background: #fcd34d; border-color: #fcd34d; color: #000; }
 .btn-process:disabled { opacity: 0.4; cursor: default; }
 
+.grain-toggle { display: inline-flex; gap: 0; border: 1px solid var(--border2); border-radius: 3px; overflow: hidden; }
+.grain-toggle .grain-btn {
+  border: none; border-right: 1px solid var(--border2);
+  border-radius: 0; padding: 4px 10px; font-size: 11px;
+}
+.grain-toggle .grain-btn:last-child { border-right: none; }
+.grain-toggle .grain-btn.grain-active {
+  background: var(--border2); color: var(--bright);
+}
+.grain-toggle .grain-btn:hover { color: var(--sig); }
+
+.worker-ind {
+  font-size: 10px; font-family: 'JetBrains Mono', monospace;
+  padding: 3px 8px; border-radius: 3px; letter-spacing: 0.06em;
+  align-self: center; user-select: none;
+}
+.worker-ind.worker-off { color: #71717a; border: 1px solid #52525b; opacity: 0.6; }
+.worker-ind.worker-on  { color: #4e8f62; border: 1px solid #4e8f62; }
+.anno { transition: background 120ms ease; cursor: pointer; }
+.anno-active { outline: 1px solid var(--sig); }
+.log-entry.log-entry-active {
+  outline: 1px solid var(--sig);
+  background: rgba(251,191,36,0.06);
+}
+
+.rec-banner-host {
+  position: fixed; top: 16px; right: 16px; z-index: 9999;
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: 420px; pointer-events: none;
+}
+.rec-banner {
+  pointer-events: auto;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 2px 10px;
+  background: #18181b;
+  border: 1px solid var(--rec, #f472b6);
+  border-left: 3px solid var(--rec, #f472b6);
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  animation: recSlideIn 180ms ease;
+}
+.rec-banner .rec-glyph { grid-row: 1 / span 2; color: var(--rec, #f472b6); font-size: 18px; line-height: 1; align-self: center; }
+.rec-banner .rec-title { font-weight: 700; letter-spacing: 0.04em; }
+.rec-banner .rec-sub { grid-column: 2; font-size: 11px; color: var(--muted); }
+.rec-banner .rec-dismiss {
+  grid-row: 1 / span 2; align-self: center;
+  border: none; background: transparent; color: var(--muted);
+  font-size: 16px; line-height: 1; padding: 2px 6px;
+  cursor: pointer;
+}
+.rec-banner .rec-dismiss:hover { color: var(--bright); }
+@keyframes recSlideIn {
+  from { transform: translateX(8px); opacity: 0; }
+  to   { transform: translateX(0);   opacity: 1; }
+}
+
 .doc-area {
   flex: 1;
   position: relative;
@@ -885,6 +947,12 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
       <div class="panel-header">
         <span class="ph-label">Document</span>
         <div class="panel-actions">
+          <span id="worker-indicator" class="worker-ind worker-off" title="OPFS worker bridge status">● OPFS</span>
+          <div class="grain-toggle" role="group" aria-label="Rendering grain">
+            <button class="grain-btn" data-grain="clause" onclick="setRenderGrain('clause')">Clause</button>
+            <button class="grain-btn grain-active" data-grain="sentence" onclick="setRenderGrain('sentence')">Sentence</button>
+            <button class="grain-btn" data-grain="paragraph" onclick="setRenderGrain('paragraph')">Paragraph</button>
+          </div>
           <button onclick="loadSampleA()">Sample A</button>
           <button onclick="loadSampleB()">Sample B</button>
           <button onclick="clearDoc()">Clear</button>
@@ -2881,8 +2949,16 @@ async function ingest(text, title, source) {
   // 6. INS + DEF — explicitly defined terms (even below threshold)
   stageINS_definitions(log, defSyntax, entityAnchors, da);
 
-  // 7. CON — sentence-level co-occurrence
+  // 7. CON — sentence-level co-occurrence + heuristic SPO (Phase 4 tier 1)
   stageCON_cooccurrence(log, sentences, entityAnchors, da);
+  try {
+    const llmQueue = stageSPO(log, sentences, entityAnchors, da);
+    // Stash the LLM queue on the log for optional later processing. The
+    // LLM pass is opt-in (rate-limit + key concerns) — see stageSPO_llm.
+    log._llmQueue = llmQueue;
+  } catch (err) {
+    console.warn('stageSPO (heuristic) failed:', err);
+  }
 
   // 8. SYN — connected components + hub topology from CON graph
   stageSYN(log, entityAnchors, da);
@@ -2919,6 +2995,726 @@ let state = {
 
 const OP_GLYPH = { INS:'●', SEG:'｜', SIG:'○', CON:'⤫', SYN:'△', EVA:'∿', NUL:'∅', DEF:'∥', REC:'⊛' };
 
+// ═══════════════════════════════════════════════════════
+// WORKER BRIDGE + OPFS PERSISTENCE (Phases 1, 2, 7, 8)
+// ═══════════════════════════════════════════════════════
+//
+// Two Web Workers own the durable state:
+//   • workers/log-worker.js   — owns the G log on OPFS
+//   • workers/fold-worker.js  — owns mutable M state + coref queues
+//
+// Both workers are optional. If OPFS or Workers are unavailable (e.g. when
+// index.html is loaded via file://), the rest of the page still runs against
+// the in-memory state object. Call paths go through `opfsAvailable()` first
+// so nothing below is blocking.
+
+const workerBridge = {
+  logWorker:    null,
+  foldWorker:   null,
+  ready:        false,
+  pending:      new Map(),
+  reqId:        0,
+  pressure:     {},
+  recCandidates: [],
+  mUpdates:     0,
+};
+
+function opfsAvailable() {
+  return typeof navigator !== 'undefined'
+      && !!navigator.storage
+      && typeof navigator.storage.getDirectory === 'function'
+      && typeof Worker !== 'undefined';
+}
+
+function workerRequest(worker, op, payload) {
+  return new Promise((resolve, reject) => {
+    if (!worker) return reject(new Error('worker not initialised'));
+    const id = ++workerBridge.reqId;
+    workerBridge.pending.set(id, { resolve, reject });
+    worker.postMessage({ id, op, payload });
+  });
+}
+
+async function initWorkers() {
+  if (workerBridge.ready) return true;
+  if (!opfsAvailable()) return false;
+  try {
+    workerBridge.logWorker  = new Worker('workers/log-worker.js');
+    workerBridge.foldWorker = new Worker('workers/fold-worker.js');
+  } catch (err) {
+    console.warn('worker init failed (likely file:// context):', err);
+    return false;
+  }
+
+  [workerBridge.logWorker, workerBridge.foldWorker].forEach(w => {
+    w.onmessage = (e) => {
+      const { id, op, result, error } = e.data || {};
+      if (id && workerBridge.pending.has(id)) {
+        const { resolve, reject } = workerBridge.pending.get(id);
+        workerBridge.pending.delete(id);
+        if (error) reject(new Error(error)); else resolve(result);
+      }
+      if (op === 'pressure_update') {
+        workerBridge.pressure = e.data.pressure || {};
+        try { renderPressureMapFromData(workerBridge.pressure); } catch {}
+      } else if (op === 'rec_candidate') {
+        workerBridge.recCandidates.push({ anchor: e.data.anchor, rec: e.data.rec });
+        try { surfaceRECCandidate(e.data.anchor, e.data.rec); } catch {}
+      } else if (op === 'm_update') {
+        workerBridge.mUpdates++;
+      }
+    };
+    w.onerror = (err) => console.warn('worker error:', err?.message || err);
+  });
+
+  try {
+    await workerRequest(workerBridge.logWorker,  'init', {});
+    await workerRequest(workerBridge.foldWorker, 'init', {});
+    workerBridge.ready = true;
+    return true;
+  } catch (err) {
+    console.warn('worker init handshake failed:', err);
+    return false;
+  }
+}
+
+async function appendToLog(entry) {
+  if (!workerBridge.ready) return null;
+  try { return await workerRequest(workerBridge.logWorker, 'append', entry); }
+  catch (err) { console.warn('appendToLog failed:', err); return null; }
+}
+
+async function queryEntityFromM(a) {
+  if (!workerBridge.ready) return null;
+  try { return await workerRequest(workerBridge.foldWorker, 'get_entity', { anchor: a }); }
+  catch { return null; }
+}
+
+async function getPressureMap() {
+  if (!workerBridge.ready) return workerBridge.pressure;
+  try { return await workerRequest(workerBridge.foldWorker, 'get_pressure', {}); }
+  catch { return {}; }
+}
+
+async function getGraphFromM() {
+  if (!workerBridge.ready) return null;
+  try { return await workerRequest(workerBridge.foldWorker, 'get_graph', {}); }
+  catch { return null; }
+}
+
+// Optional UI hooks the main thread reacts to — wrapped in try/catch above so
+// the bridge keeps working even if the page hasn't defined them yet.
+function renderPressureMapFromData(pressure) {
+  // Minimal pressure readout: update the right-tab badge with the count of
+  // entities whose z-score exceeds 1 (i.e. one standard deviation above mean).
+  const el = document.getElementById('pressure-count');
+  if (!el) return;
+  const n = Object.values(pressure || {}).filter(v => (v?.z || 0) >= 1).length;
+  el.textContent = n ? `(${n}↑)` : '';
+}
+
+const surfacedRECs = new Set();
+function surfaceRECCandidate(anchorId, rec) {
+  if (!anchorId || surfacedRECs.has(anchorId)) return;
+  surfacedRECs.add(anchorId);
+  console.log('[REC] candidate surfaced for', anchorId,
+              'conflicts:', rec?.operand?.conflict_count,
+              'note:', rec?.operand?.note);
+
+  let host = document.getElementById('rec-banner-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'rec-banner-host';
+    host.className = 'rec-banner-host';
+    document.body.appendChild(host);
+  }
+  const dn = (typeof resolveDisplayName === 'function')
+    ? resolveDisplayName(anchorId) : anchorId.slice(0,16);
+  const confl = rec?.operand?.conflict_count ?? '?';
+  const note  = rec?.operand?.note || 'Frame under sustained pressure';
+  const card = document.createElement('div');
+  card.className = 'rec-banner';
+  card.innerHTML = `
+    <span class="rec-glyph">⊛</span>
+    <span class="rec-title">REC: ${escapeHtml(String(dn))}</span>
+    <span class="rec-sub">${confl} conflict${confl === 1 ? '' : 's'} — ${escapeHtml(String(note))}</span>
+    <button class="rec-dismiss" title="dismiss">×</button>
+  `;
+  card.querySelector('.rec-dismiss').addEventListener('click', () => card.remove());
+  host.appendChild(card);
+  // Auto-dismiss after 12s so the host doesn't snowball.
+  setTimeout(() => { if (card.isConnected) card.remove(); }, 12000);
+}
+
+function setWorkerIndicator(on) {
+  const el = document.getElementById('worker-indicator');
+  if (!el) return;
+  el.classList.toggle('worker-on',  !!on);
+  el.classList.toggle('worker-off', !on);
+  el.title = on ? 'OPFS worker bridge ready' : 'Workers unavailable — in-memory only';
+}
+
+// ── Document storage (Phase 2) ─────────────────────────────────
+
+async function storeRawDocument(text, title, docAnchor) {
+  if (!opfsAvailable()) return false;
+  try {
+    const root = await navigator.storage.getDirectory();
+    const corpus = await root.getDirectoryHandle('corpus', { create: true });
+    const docs = await corpus.getDirectoryHandle('documents', { create: true });
+
+    const rawHandle = await docs.getFileHandle(`${docAnchor}.raw`, { create: true });
+    const rw = await rawHandle.createWritable();
+    await rw.write(text);
+    await rw.close();
+
+    const meta = extractFormatMeta(text);
+    meta.title = title;
+    const metaHandle = await docs.getFileHandle(`${docAnchor}.meta.json`, { create: true });
+    const mw = await metaHandle.createWritable();
+    await mw.write(JSON.stringify(meta));
+    await mw.close();
+    return true;
+  } catch (err) {
+    console.warn('storeRawDocument failed:', err);
+    return false;
+  }
+}
+
+function extractFormatMeta(text) {
+  const paragraphs = [];
+  const headers = [];
+  const paraRegex = /\n\s*\n/g;
+  let lastEnd = 0, m;
+  while ((m = paraRegex.exec(text)) !== null) {
+    const segment = text.slice(lastEnd, m.index);
+    const trimmedStart = lastEnd + (segment.length - segment.trimStart().length);
+    const trimmed = segment.trim();
+    if (trimmed.length > 0) {
+      paragraphs.push({ start: trimmedStart, end: trimmedStart + trimmed.length,
+                        text: trimmed.slice(0, 80) });
+    }
+    lastEnd = m.index + m[0].length;
+  }
+  const tail = text.slice(lastEnd);
+  const tailTrim = tail.trim();
+  if (tailTrim.length > 0) {
+    const s = lastEnd + (tail.length - tail.trimStart().length);
+    paragraphs.push({ start: s, end: s + tailTrim.length, text: tailTrim.slice(0, 80) });
+  }
+
+  const lines = text.split('\n');
+  let lineStart = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length > 3 && trimmed.length < 120) {
+      if (/^[A-Z][A-Z\s\.\-\:]{4,}$/.test(trimmed) || /^#{1,6}\s/.test(trimmed)) {
+        headers.push({ start: lineStart + line.indexOf(trimmed), text: trimmed });
+      }
+    }
+    lineStart += line.length + 1;
+  }
+  return { paragraphs, headers };
+}
+
+async function storeResolvedSpans(log, docAnchor) {
+  if (!opfsAvailable()) return false;
+  try {
+    const spans = log.entries()
+      .filter(e => e.provenance?.span_start != null
+                  && e.provenance?.doc_anchor === docAnchor)
+      .map(e => ({
+        log_id: e.log_id,
+        anchor: e.anchor,
+        op: e.op,
+        span_start: e.provenance.span_start,
+        span_end: e.provenance.span_end,
+        confidence: e.provenance.confidence,
+        cell_id: e.operand?.cell_id,
+        entity_anchor: e.target === 'entity-registry' ? e.anchor :
+                       (typeof e.target === 'string' && e.target.startsWith('@')) ? e.target : null,
+        detector: e.operand?.detector,
+      }));
+
+    const root = await navigator.storage.getDirectory();
+    const corpus = await root.getDirectoryHandle('corpus', { create: true });
+    const docs   = await corpus.getDirectoryHandle('documents', { create: true });
+    const handle = await docs.getFileHandle(`${docAnchor}.spans.ndjson`, { create: true });
+    const w = await handle.createWritable();
+    await w.write(spans.map(s => JSON.stringify(s)).join('\n'));
+    await w.close();
+    return true;
+  } catch (err) {
+    console.warn('storeResolvedSpans failed:', err);
+    return false;
+  }
+}
+
+// ── Multi-grain OPFS-backed rendering (Phase 5) ────────────────
+
+async function renderDocumentFromOPFS(docAnchor, grain = 'sentence', activeSpanId = null) {
+  if (!opfsAvailable()) return null;
+  try {
+    const root = await navigator.storage.getDirectory();
+    const corpus = await root.getDirectoryHandle('corpus');
+    const docs   = await corpus.getDirectoryHandle('documents');
+
+    const rawHandle = await docs.getFileHandle(`${docAnchor}.raw`);
+    const rawText = await (await rawHandle.getFile()).text();
+
+    let meta = { paragraphs: [], headers: [] };
+    try {
+      const metaHandle = await docs.getFileHandle(`${docAnchor}.meta.json`);
+      meta = JSON.parse(await (await metaHandle.getFile()).text());
+    } catch {}
+
+    let spans = [];
+    try {
+      const spansHandle = await docs.getFileHandle(`${docAnchor}.spans.ndjson`);
+      const spansText = await (await spansHandle.getFile()).text();
+      spans = spansText.split('\n').filter(l => l.trim()).map(l => {
+        try { return JSON.parse(l); } catch { return null; }
+      }).filter(Boolean)
+        .filter(s => grainFilter(s, grain))
+        .sort((a,b) => a.span_start - b.span_start);
+    } catch {}
+
+    return buildAnnotatedHTML(rawText, meta, spans, activeSpanId, grain);
+  } catch (err) {
+    console.warn('renderDocumentFromOPFS failed:', err);
+    return null;
+  }
+}
+
+function grainFilter(span, grain) {
+  if (grain === 'clause') return true;
+  if (grain === 'sentence')  return ['INS','CON','SYN','DEF','EVA','NUL','REC'].includes(span.op);
+  if (grain === 'paragraph') return ['INS','SYN','DEF','REC'].includes(span.op);
+  return true;
+}
+
+function buildAnnotatedHTML(rawText, meta, spans, activeSpanId, _grain) {
+  const events = buildNestingOrder(spans);
+  let html = '';
+  let pos = 0;
+  const _escape = (s) => s
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+  for (const ev of events) {
+    if (ev.type === 'open') {
+      if (ev.span.span_start > pos) {
+        html += _escape(rawText.slice(pos, ev.span.span_start));
+        pos = ev.span.span_start;
+      }
+      const op = (ev.span.op || '').toLowerCase();
+      const conf = ev.span.confidence || 0.5;
+      const opacity = Math.max(0.15, conf * 0.6);
+      const isActive = ev.span.log_id === activeSpanId;
+      html += `<span class="anno anno-${op}${isActive ? ' anno-active' : ''}"`
+           +  ` style="background:${opColor(ev.span.op, opacity)}"`
+           +  ` data-log-id="${ev.span.log_id}"`
+           +  ` data-anchor="${ev.span.entity_anchor || ev.span.anchor}"`
+           +  ` data-op="${ev.span.op}"`
+           +  ` data-confidence="${conf.toFixed(2)}">`;
+    } else if (ev.type === 'close') {
+      if (ev.span.span_end > pos) {
+        html += _escape(rawText.slice(pos, ev.span.span_end));
+        pos = ev.span.span_end;
+      }
+      html += '</span>';
+    }
+  }
+  if (pos < rawText.length) html += _escape(rawText.slice(pos));
+  return html;
+}
+
+function opColor(op, opacity) {
+  const colors = {
+    INS: `rgba(78,143,98,${opacity})`,
+    SIG: `rgba(251,191,36,${opacity})`,
+    CON: `rgba(184,118,50,${opacity})`,
+    SEG: `rgba(96,165,250,${opacity})`,
+    SYN: `rgba(138,106,154,${opacity})`,
+    DEF: `rgba(34,211,238,${opacity})`,
+    EVA: `rgba(167,139,250,${opacity})`,
+    NUL: `rgba(248,113,113,${opacity})`,
+    REC: `rgba(244,114,182,${opacity})`,
+  };
+  return colors[op] || `rgba(128,128,128,${opacity})`;
+}
+
+function buildNestingOrder(spans) {
+  const events = [];
+  const stack = [];
+  const sorted = spans.slice().sort((a,b) =>
+    a.span_start - b.span_start ||
+    (b.span_end - b.span_start) - (a.span_end - a.span_start)
+  );
+  for (const span of sorted) {
+    while (stack.length && stack[stack.length-1].span_end <= span.span_start) {
+      events.push({ type: 'close', span: stack.pop() });
+    }
+    // Skip spans that aren't properly contained (overlap without nesting).
+    if (stack.length && span.span_end > stack[stack.length-1].span_end) continue;
+    events.push({ type: 'open', span });
+    stack.push(span);
+  }
+  while (stack.length) events.push({ type: 'close', span: stack.pop() });
+  return events;
+}
+
+// ── Heuristic SPO extraction (Phase 4, tier 1) ─────────────────
+
+function extractSPO_heuristic(sentence) {
+  if (typeof tokenize !== 'function' || typeof tagToken !== 'function') return [];
+  const triples = [];
+  const tokens = tokenize(sentence);
+  let subjectToks = [], verbTok = null, objectToks = [];
+  let state = 'seeking_subject';
+
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    let tag;
+    try { tag = tagToken(tok.clean, i > 0 ? tokens[i-1].clean : '', i === 0); }
+    catch { tag = 'OTHER'; }
+
+    if (state === 'seeking_subject') {
+      if (tag === 'PROPER' || tag === 'NOUN') subjectToks.push(tok);
+      else if (tag === 'VERB' && subjectToks.length > 0) {
+        verbTok = tok;
+        state = 'seeking_object';
+      }
+    } else if (state === 'seeking_object') {
+      if (tag === 'PROPER' || tag === 'NOUN') objectToks.push(tok);
+      else if ((tag === 'VERB' || tag === 'STOP') && objectToks.length > 0) {
+        triples.push(_mkTriple(subjectToks, verbTok, objectToks));
+        subjectToks = []; verbTok = null; objectToks = [];
+        state = 'seeking_subject';
+        i--;
+      }
+    }
+  }
+  if (subjectToks.length && verbTok && objectToks.length) {
+    triples.push(_mkTriple(subjectToks, verbTok, objectToks));
+  }
+  return triples;
+}
+
+function _mkTriple(subjectToks, verbTok, objectToks) {
+  return {
+    s: subjectToks.map(t=>t.clean).join(' '),
+    p: verbTok.clean,
+    o: objectToks.map(t=>t.clean).join(' '),
+    s_start: subjectToks[0].start,
+    p_start: verbTok.start,
+    o_start: objectToks[0].start,
+    o_end: objectToks[objectToks.length-1].end,
+    confidence: 0.65,
+  };
+}
+
+function findNearestAnchor(norm, entityAnchors) {
+  if (!norm) return null;
+  if (entityAnchors[norm]) return entityAnchors[norm];
+  for (const [key, anc] of Object.entries(entityAnchors)) {
+    if (key.includes(norm) || norm.includes(key)) return anc;
+  }
+  return null;
+}
+
+// stageSPO: runs alongside the legacy co-occurrence extractor. When it finds
+// grounded triples it records them with richer provenance; otherwise it
+// collects a queue for the LLM pass.
+function stageSPO(log, sentences, entityAnchors, da) {
+  const llmQueue = [];
+  for (const sent of sentences) {
+    let triples = [];
+    try { triples = extractSPO_heuristic(sent.text); } catch {}
+    for (const triple of triples) {
+      const sNorm = normalizeNP(triple.s);
+      const oNorm = normalizeNP(triple.o);
+      const sAnchor = entityAnchors[sNorm] || findNearestAnchor(sNorm, entityAnchors);
+      const oAnchor = entityAnchors[oNorm] || findNearestAnchor(oNorm, entityAnchors);
+      if (!sAnchor || !oAnchor) {
+        if (triple.confidence < 0.5) {
+          llmQueue.push({ sent: sent.text, triple, sent_start: sent.start });
+        }
+        continue;
+      }
+      const predNorm = triple.p.toLowerCase();
+      const conAnchor = anchor(`spo:${sAnchor}:${predNorm}:${oAnchor}:${sent.start}`);
+      log.push(makeEntry('CON', conAnchor, sAnchor, {
+        object_anchor: oAnchor,
+        predicate: triple.p,
+        predicate_normalized: predNorm,
+        relation_type: 'spo',
+        subject_text: triple.s,
+        object_text: triple.o,
+        sentence_fragment: sent.text.slice(0, 120),
+        spo: { s: triple.s, p: triple.p, o: triple.o },
+      }, {
+        source: 'mechanical:spo_heuristic',
+        span_start: sent.start + triple.s_start,
+        span_end: sent.start + triple.o_end,
+        doc_anchor: da,
+        confidence: triple.confidence,
+      }));
+    }
+    if (triples.length === 0 && sent.text.length > 40) {
+      llmQueue.push({ sent: sent.text, triple: null, sent_start: sent.start });
+    }
+  }
+  return llmQueue;
+}
+
+// ── Pronoun coreference via the fold worker (Phase 3) ──────────
+
+function detectGramFeatures(pronoun) {
+  const p = pronoun.toLowerCase();
+  const plural   = ['they','them','their','theirs','we','us','our','ours'];
+  const singular = ['he','him','his','she','her','hers','it','its','i','me','my'];
+  return {
+    number: plural.includes(p) ? 'plural'
+          : singular.includes(p) ? 'singular' : null,
+    person: ['i','me','my','we','us','our'].includes(p) ? 'first'
+          : ['you','your','yours'].includes(p) ? 'second' : 'third',
+    animacy: ['it','its'].includes(p) ? 'inanimate' : null,
+  };
+}
+
+// Post-ingest coref upgrade. After runIngest has pushed every INS to the
+// fold worker (so M state + grain queues are populated), walk back over
+// the unresolved pronoun SIGs and ask the worker to resolve them. New CON
+// or NUL entries are appended to both the in-memory log and the worker.
+async function resolvePronounsPostIngest(log, da) {
+  if (!workerBridge.ready) return 0;
+  const pendingPronouns = log.entries().filter(e =>
+    e.op === 'SIG'
+    && e.operand?.detector === 'PRONOUN'
+    && e.operand?.resolution_status === 'unresolved'
+    && e.provenance?.doc_anchor === da
+  );
+  let resolved = 0;
+  for (const sigEntry of pendingPronouns) {
+    const pronoun = sigEntry.operand?.text || '';
+    if (!pronoun) continue;
+    const gram = detectGramFeatures(pronoun);
+    let resolution;
+    try {
+      resolution = await workerRequest(workerBridge.foldWorker, 'resolve_coreference', {
+        text: pronoun,
+        position: sigEntry.provenance.span_start,
+        gram_features: gram,
+      });
+    } catch { continue; }
+
+    if (resolution?.resolved) {
+      const conEntry = makeEntry('CON',
+        anchor('coref:' + sigEntry.anchor + ':' + resolution.anchor),
+        sigEntry.anchor, {
+          object_anchor: resolution.anchor,
+          relation_type: 'coreference',
+          pronoun_text: pronoun,
+          resolution_grain: resolution.grain,
+          alternatives: resolution.alternatives,
+        }, {
+          source: 'mechanical:coref_integral_fold',
+          span_start: sigEntry.provenance.span_start,
+          span_end: sigEntry.provenance.span_end,
+          doc_anchor: da,
+          confidence: resolution.confidence || 0,
+        });
+      log.push(conEntry);
+      await appendToLog(conEntry);
+      resolved++;
+    } else if (resolution) {
+      const nulEntry = makeEntry('NUL',
+        anchor('nul:coref:' + sigEntry.anchor), `doc:${da}`, {
+          absence_type: resolution.nul_state,
+          signal: pronoun,
+          expected: 'coreference_anchor',
+        }, {
+          source: 'mechanical:coref_nul',
+          span_start: sigEntry.provenance.span_start,
+          span_end: sigEntry.provenance.span_end,
+          doc_anchor: da,
+          confidence: 0.85,
+        });
+      log.push(nulEntry);
+      await appendToLog(nulEntry);
+    }
+  }
+  return resolved;
+}
+
+async function stageSIG_pronouns_withCoref(log, text, da) {
+  // Falls back to the legacy shallow pass if workers aren't ready.
+  if (!workerBridge.ready) {
+    try { stageSIG_pronouns(log, text, da); } catch {}
+    return;
+  }
+  const pat = PRONOUN_PATTERNS[_currentScript] || PRONOUN_PATTERNS.latin;
+  const re = new RegExp(pat.source, pat.flags.includes('g') ? pat.flags : pat.flags+'g');
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const pronoun = m[0];
+    const gram = detectGramFeatures(pronoun);
+    let resolution;
+    try {
+      resolution = await workerRequest(workerBridge.foldWorker, 'resolve_coreference', {
+        text: pronoun,
+        position: m.index,
+        gram_features: gram,
+      });
+    } catch {
+      resolution = { resolved: false, nul_state: 'unknown' };
+    }
+
+    const a = anchor('pron:' + pronoun.toLowerCase() + ':' + m.index);
+    if (resolution.resolved) {
+      log.push(makeEntry('CON',
+        anchor('coref:' + a + ':' + resolution.anchor), a, {
+          object_anchor: resolution.anchor,
+          relation_type: 'coreference',
+          pronoun_text: pronoun,
+          resolution_grain: resolution.grain,
+          alternatives: resolution.alternatives,
+        }, {
+          source: 'mechanical:coref_integral_fold',
+          span_start: m.index,
+          span_end: m.index + pronoun.length,
+          doc_anchor: da,
+          confidence: resolution.confidence || 0,
+        }));
+    } else {
+      log.push(makeEntry('SIG', a, `doc:${da}`, {
+        text: pronoun,
+        detector: 'PRONOUN',
+        resolution_status: 'unresolved',
+        nul_state: resolution.nul_state,
+        candidate_op: 'CON',
+      }, {
+        source: 'mechanical:pronoun',
+        span_start: m.index,
+        span_end: m.index + pronoun.length,
+        doc_anchor: da,
+        confidence: 0.0,
+      }));
+      log.push(makeEntry('NUL',
+        anchor('nul:coref:' + a), `doc:${da}`, {
+          absence_type: resolution.nul_state,
+          signal: pronoun,
+          expected: 'coreference_anchor',
+        }, {
+          source: 'mechanical:coref_nul',
+          span_start: m.index,
+          span_end: m.index + pronoun.length,
+          doc_anchor: da,
+          confidence: 0.85,
+        }));
+    }
+  }
+}
+
+// ── Optional LLM SPO pass (Phase 4 tier 3) ─────────────────────
+//
+// Runs on-demand against the queue collected by stageSPO. Requires the
+// caller to provide an API key + endpoint via window.EO_LLM_CONFIG so the
+// page ships without embedded secrets.
+async function stageSPO_llm(sentences, entityAnchors, da, log, opts = {}) {
+  const cfg = opts.config || (typeof window !== 'undefined' ? window.EO_LLM_CONFIG : null);
+  if (!cfg || !cfg.endpoint) {
+    console.warn('stageSPO_llm: window.EO_LLM_CONFIG.endpoint not set — skipping');
+    return 0;
+  }
+  const batch = sentences.slice(0, opts.batchSize || 20);
+  if (!batch.length) return 0;
+
+  const prompt = `Extract all Subject-Predicate-Object triples from each sentence.
+Return JSON array: [{"s":"subject","p":"predicate","o":"object","sentence_index":N}]
+Only extract triples where both subject and object are named entities.
+Return only JSON, no other text.
+
+Sentences:
+${batch.map((item, i) => `${i}: ${item.sent}`).join('\n')}`;
+
+  let added = 0;
+  try {
+    const response = await fetch(cfg.endpoint, {
+      method: 'POST',
+      headers: Object.assign(
+        { 'Content-Type': 'application/json' },
+        cfg.headers || {}
+      ),
+      body: JSON.stringify(Object.assign({
+        model: cfg.model || 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }],
+      }, cfg.body || {})),
+    });
+    const data = await response.json();
+    const rawText = data?.content?.[0]?.text || data?.choices?.[0]?.message?.content || '[]';
+    const triples = JSON.parse(rawText.replace(/```json|```/g, '').trim());
+
+    for (const t of triples) {
+      const item = batch[t.sentence_index];
+      if (!item) continue;
+      const sNorm = normalizeNP(t.s);
+      const oNorm = normalizeNP(t.o);
+      const sAnchor = entityAnchors[sNorm] || findNearestAnchor(sNorm, entityAnchors);
+      const oAnchor = entityAnchors[oNorm] || findNearestAnchor(oNorm, entityAnchors);
+      if (!sAnchor || !oAnchor) continue;
+      const predNorm = (t.p || '').toLowerCase();
+      log.push(makeEntry('CON',
+        anchor(`llm_spo:${sAnchor}:${predNorm}:${oAnchor}`), sAnchor, {
+          object_anchor: oAnchor,
+          predicate: t.p,
+          predicate_normalized: predNorm,
+          relation_type: 'spo_llm',
+          spo: { s: t.s, p: t.p, o: t.o },
+          sentence_fragment: (item.sent || '').slice(0, 120),
+        }, {
+          source: 'llm:spo_extraction',
+          doc_anchor: da,
+          confidence: 0.85,
+        }));
+      added++;
+    }
+  } catch (e) {
+    console.warn('LLM SPO pass failed:', e);
+  }
+  return added;
+}
+
+// Expose a thin helper so operators can trigger the LLM pass from the console.
+if (typeof window !== 'undefined') {
+  window.runLLM_SPO = async function runLLM_SPO() {
+    if (!state.docs.length) return 0;
+    const doc = state.docs[state.activeDoc];
+    const queue = doc.log?._llmQueue || [];
+    if (!queue.length) { console.log('no queued sentences'); return 0; }
+    const entityAnchors = {};
+    for (const e of doc.log.entries()) {
+      if (e.op === 'INS' && e.target === 'entity-registry') {
+        const dn = resolveDisplayName(e.anchor);
+        if (dn) entityAnchors[normalizeNP(dn)] = e.anchor;
+      }
+    }
+    return stageSPO_llm(queue, entityAnchors, doc.doc_anchor, doc.log);
+  };
+}
+
+// Kick off worker initialisation in the background — never blocks the page.
+if (typeof window !== 'undefined') {
+  window.addEventListener('load', () => {
+    initWorkers().then(ok => {
+      setWorkerIndicator(ok);
+      if (ok) console.log('[workers] OPFS log+fold bridge ready');
+    });
+  });
+}
+
 function runIngest() {
   const text = document.getElementById('doc-input').value.trim();
   if (!text) return;
@@ -2926,9 +3722,31 @@ function runIngest() {
 
   document.getElementById('btn-process').disabled = true;
 
-  ingest(text, title, title).then(({ log, doc_anchor }) => {
+  // Phase 2 pre-step: persist raw text + format meta to OPFS before any
+  // processing. Runs lazily; silent no-op when OPFS is unavailable.
+  const _docAnchorPre = anchor(text);
+  storeRawDocument(text, title, _docAnchorPre).catch(() => {});
+
+  ingest(text, title, title).then(async ({ log, doc_anchor }) => {
     state.docs.push({ title, text, log, doc_anchor });
     state.activeDoc = state.docs.length - 1;
+
+    // Phase 7/8: mirror every new log entry into the OPFS-backed Log Worker.
+    // The Fold Worker observes via BroadcastChannel and folds into M state.
+    if (workerBridge.ready) {
+      for (const entry of log.entries()) {
+        await appendToLog(entry);
+      }
+      // Phase 3: now that INS entries have populated the fold worker's grain
+      // queues, walk pronoun SIGs back through integral-fold coref. Adds
+      // CON/NUL entries to the log in place so downstream stages see them.
+      try { await resolvePronounsPostIngest(log, doc_anchor); } catch (e) {
+        console.warn('post-ingest coref failed:', e);
+      }
+      try { await storeResolvedSpans(log, doc_anchor); } catch {}
+      try { await workerRequest(workerBridge.foldWorker, 'flush', {}); } catch {}
+      try { await workerRequest(workerBridge.logWorker, 'flush_index', {}); } catch {}
+    }
 
     // Rebuild combined log
     state.combined = new OperatorLog();
@@ -3021,11 +3839,75 @@ function newDoc() {
   document.getElementById('doc-input').focus();
 }
 
+// Active rendering grain — toggled by UI below. Defaults to sentence; the
+// OPFS renderer filters span events accordingly (clause ⊃ sentence ⊃
+// paragraph in terms of how much detail bleeds through).
+let currentGrain = 'sentence';
+
+// Delegated click handler on the annotated doc viewer: clicking a span
+// highlights the corresponding log entry + scrolls it into view. Reads
+// the data-log-id attribute the OPFS renderer already emits.
+function wireDocViewerClicks() {
+  const viewer = document.getElementById('doc-viewer');
+  if (!viewer || viewer._eoClickBound) return;
+  viewer._eoClickBound = true;
+  viewer.addEventListener('click', (ev) => {
+    const span = ev.target.closest('.anno');
+    if (!span) return;
+    const logId = span.dataset.logId;
+    if (!logId) return;
+    // Clear previous highlight.
+    document.querySelectorAll('.anno.anno-active')
+      .forEach(s => s.classList.remove('anno-active'));
+    span.classList.add('anno-active');
+    // Find + highlight the matching log entry.
+    if (!state.combined) return;
+    const entries = state.combined.entries();
+    const idx = entries.findIndex(e => e.log_id === logId);
+    if (idx < 0) return;
+    const row = document.querySelector(`.log-entry[data-idx="${idx}"]`);
+    if (row) {
+      document.querySelectorAll('.log-entry.log-entry-active')
+        .forEach(r => r.classList.remove('log-entry-active'));
+      row.classList.add('log-entry-active');
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  });
+}
+
 function renderDocViewer() {
   if (state.docs.length === 0) return;
   const doc = state.docs[state.activeDoc];
   const viewer = document.getElementById('doc-viewer');
+  // Plain-text fallback so the viewer always shows _something_ instantly.
   viewer.innerHTML = escapeHtml(doc.text);
+  // Overlay the OPFS-backed annotated render when available. Silent no-op
+  // when workers/OPFS aren't ready (e.g. loaded from file://).
+  renderDocumentFromOPFS(doc.doc_anchor, currentGrain).then(html => {
+    if (typeof html === 'string' && html.length > 0) {
+      viewer.innerHTML = html;
+      wireDocViewerClicks();
+    }
+  }).catch(() => {});
+}
+
+// Expose a grain switcher for consoles / keyboard shortcut wiring. Press
+// 1/2/3 in the ingest view to flip between clause / sentence / paragraph.
+if (typeof window !== 'undefined') {
+  window.setRenderGrain = function setRenderGrain(g) {
+    if (!['clause','sentence','paragraph'].includes(g)) return;
+    currentGrain = g;
+    document.querySelectorAll('.grain-toggle .grain-btn').forEach(btn => {
+      btn.classList.toggle('grain-active', btn.dataset.grain === g);
+    });
+    try { renderDocViewer(); } catch {}
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
+    if (e.key === '1') window.setRenderGrain('clause');
+    else if (e.key === '2') window.setRenderGrain('sentence');
+    else if (e.key === '3') window.setRenderGrain('paragraph');
+  });
 }
 
 function renderLog() {
