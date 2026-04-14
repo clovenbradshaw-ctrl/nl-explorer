@@ -1548,11 +1548,19 @@ function segmentClauses(sent, sentStart, script) {
 // ── Log class ─────────────────────────────────────────
 
 class OperatorLog {
-  constructor() { this._e = []; }
-  push(e) { this._e.push(e); return e; }
+  constructor() { this._e = []; this._sub = null; }
+  push(e) {
+    this._e.push(e);
+    // Live-subscription hook: lets the UI stream operator events into the
+    // log panel as they are produced by the ingest pipeline. Errors in the
+    // subscriber must never corrupt log state.
+    if (this._sub) { try { this._sub(e); } catch {} }
+    return e;
+  }
   entries() { return [...this._e]; }
   byOp(op) { return this._e.filter(e => e.op === op); }
   toNDJSON() { return this._e.map(e => JSON.stringify(e)).join('\n'); }
+  subscribe(fn) { this._sub = fn; }
 }
 
 function makeEntry(op, anc, target, operand, provenance) {
@@ -2924,32 +2932,51 @@ function stageEmbeddingLoop(combinedLog) {
   stageREC_embedding(combinedLog);
 }
 
-async function ingest(text, title, source) {
-  const log = new OperatorLog();
+async function ingest(text, title, source, log) {
+  if (!log) log = new OperatorLog();
+  // Yield to the event loop between stages so the UI can repaint and show
+  // operator events as they stream in. Without this, the pipeline runs to
+  // completion in one JS turn and the user sees nothing until the end.
+  const yieldTick = () => new Promise(r => setTimeout(r, 0));
+  const setStage = (label) => {
+    const el = document.getElementById('parsing-label');
+    if (el) el.textContent = label;
+  };
+
   text = cleanText(text);
   _currentScript = detectScript(text);  // set global script context for this ingest
 
   // 1. NUL → INS document (immutable ground)
+  setStage('INS · document ground');
   const da = stageINS(log, text, title, source);
+  await yieldTick();
 
   // 2. SEG — sentence + clause boundaries
+  setStage('SEG · segmenting');
   const sentences = stageSEG(log, text, da);
+  await yieldTick();
 
   // 3. SIG — NP extraction (universal), pronouns, reframe signals
+  setStage('SIG · extracting');
   const { clusters, mean, sd } = stageSIG_NPs(log, text, da);
   stageSIG_pronouns(log, text, da);
   stageSIG_reframe(log, text, da);
+  await yieldTick();
 
   // 4. Detect explicit definition syntax
   const defSyntax = detectDefinitions(text);
 
   // 5. INS — threshold-based entity instantiation
+  setStage('INS · entities');
   const entityAnchors = stageINS_threshold(log, clusters, mean, sd, da);
+  await yieldTick();
 
   // 6. INS + DEF — explicitly defined terms (even below threshold)
   stageINS_definitions(log, defSyntax, entityAnchors, da);
+  await yieldTick();
 
   // 7. CON — sentence-level co-occurrence + heuristic SPO (Phase 4 tier 1)
+  setStage('CON · co-occurrence');
   stageCON_cooccurrence(log, sentences, entityAnchors, da);
   try {
     const llmQueue = stageSPO(log, sentences, entityAnchors, da);
@@ -2959,20 +2986,29 @@ async function ingest(text, title, source) {
   } catch (err) {
     console.warn('stageSPO (heuristic) failed:', err);
   }
+  await yieldTick();
 
   // 8. SYN — connected components + hub topology from CON graph
+  setStage('SYN · topology');
   stageSYN(log, entityAnchors, da);
+  await yieldTick();
 
   // 9. DEF (frame) — structural hypothesis: CON neighborhood at this moment
+  setStage('DEF · frames');
   stageFrameDEF(log, entityAnchors, da);
+  await yieldTick();
 
   // 9b. EVA (embedding) — per-clause nearest-centroid classification
+  setStage('EVA · embeddings');
   await stageEmbeddingClassify(log, da);
 
   // 10. EVA (temporal) — data collection pass: date-anchored assertions
+  setStage('EVA · temporal');
   stageEVA_temporal(log, text, da);
+  await yieldTick();
 
   // 11. NUL — absence signals
+  setStage('NUL · absence');
   stageNUL(log, text, da);
 
   return { log, doc_anchor: da };
@@ -3727,9 +3763,48 @@ function runIngest() {
   const _docAnchorPre = anchor(text);
   storeRawDocument(text, title, _docAnchorPre).catch(() => {});
 
-  ingest(text, title, title).then(async ({ log, doc_anchor }) => {
-    state.docs.push({ title, text, log, doc_anchor });
-    state.activeDoc = state.docs.length - 1;
+  // ── Immediate visibility ────────────────────────────────────────
+  // Push a live-updating stub doc into state.docs *before* the ingest
+  // pipeline runs, so the viewer can show the raw text right away and
+  // the log panel can stream operator events as they're produced.
+  const liveLog = new OperatorLog();
+  const stubDoc = { title, text, log: liveLog, doc_anchor: _docAnchorPre };
+  state.docs.push(stubDoc);
+  state.activeDoc = state.docs.length - 1;
+
+  document.getElementById('doc-input').style.display = 'none';
+  document.getElementById('doc-viewer').style.display = 'block';
+  renderTabs();
+  renderDocViewer();
+
+  // Throttled live-render: each operator push schedules a renderLog pass
+  // on the next animation frame. Coalesces bursts during heavy stages.
+  let rafScheduled = false;
+  liveLog.subscribe(() => {
+    if (rafScheduled) return;
+    rafScheduled = true;
+    requestAnimationFrame(() => {
+      rafScheduled = false;
+      try {
+        // Rebuild combined log incrementally so renderLog() sees the
+        // in-flight entries from every doc. Cheap while logs are small;
+        // for large corpora the throttle keeps this to ~60fps.
+        const combined = new OperatorLog();
+        for (const d of state.docs) {
+          for (const e of d.log.entries()) combined.push(e);
+        }
+        state.combined = combined;
+        renderLog();
+      } catch {}
+    });
+  });
+
+  ingest(text, title, title, liveLog).then(async ({ log, doc_anchor }) => {
+    // ingest() populated liveLog in place; doc_anchor may differ from the
+    // pre-anchor (cleanText can shift it). Update the stub rather than
+    // pushing a duplicate.
+    stubDoc.log = log;
+    stubDoc.doc_anchor = doc_anchor;
 
     // Phase 7/8: mirror every new log entry into the OPFS-backed Log Worker.
     // The Fold Worker observes via BroadcastChannel and folds into M state.
@@ -3766,12 +3841,16 @@ function runIngest() {
     // Phase 3 — DEF → EVA → REC loop on embedding evidence
     stageEmbeddingLoop(state.combined);
 
+    // Detach the live subscriber — full renderAll below supersedes it.
+    liveLog.subscribe(null);
+
     renderAll();
     document.getElementById('btn-process').disabled = false;
+    const parsingLabel = document.getElementById('parsing-label');
+    if (parsingLabel) parsingLabel.textContent = '';
 
-    // Switch to viewer
-    document.getElementById('doc-input').style.display = 'none';
-    document.getElementById('doc-viewer').style.display = 'block';
+    // Viewer is already visible from the pre-ingest switch; re-render to
+    // pick up the final annotated OPFS overlay (spans now persisted).
     renderDocViewer();
 
     // Push the new doc into the Document Explorer presentation layer.
@@ -3786,6 +3865,22 @@ function runIngest() {
     }
   }).catch((err) => {
     console.error('ingest failed', err);
+    // Remove the stub doc we pushed optimistically so the user isn't
+    // stuck staring at a half-processed document. Keep the viewer open
+    // with raw text if any entries did land; otherwise revert to input.
+    liveLog.subscribe(null);
+    if (liveLog.entries().length === 0) {
+      const idx = state.docs.indexOf(stubDoc);
+      if (idx !== -1) state.docs.splice(idx, 1);
+      state.activeDoc = Math.max(0, state.docs.length - 1);
+      if (state.docs.length === 0) {
+        document.getElementById('doc-viewer').style.display = 'none';
+        document.getElementById('doc-input').style.display = 'block';
+      } else {
+        renderTabs();
+        renderDocViewer();
+      }
+    }
     document.getElementById('btn-process').disabled = false;
     const el = document.getElementById('parsing-label');
     if (el) el.textContent = 'Error: ' + (err?.message || err);
