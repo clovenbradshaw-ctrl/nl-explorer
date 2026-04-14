@@ -263,6 +263,129 @@ button:hover { border-color: var(--sig); color: var(--sig); }
 .worker-ind.worker-on  { color: #4e8f62; border: 1px solid #4e8f62; }
 .anno { transition: background 120ms ease, box-shadow 180ms ease; cursor: pointer; }
 .anno-active { outline: 1px solid var(--sig); }
+
+/* Structural grain cells — every word/clause/sentence/paragraph/section/
+   document is a clickable hit target. Default has no decoration so plain
+   text still reads as plain text; decoration appears on hover at the
+   current zoom grain, and a persistent outline marks the selected cell.
+   [data-zoom=<grain>] on the doc-viewer gates which tier highlights on
+   hover so zooming in narrows the effective target. */
+.grain { cursor: pointer; }
+.grain-token    { border-radius: 2px; }
+.grain-clause   { border-radius: 2px; }
+.grain-sentence { border-radius: 2px; }
+.grain-paragraph { border-radius: 3px; }
+.grain-section  { border-radius: 3px; }
+.grain-document { border-radius: 3px; }
+
+/* Hover ring — only the grain matching the current zoom level reacts,
+   so the hit target is predictable at each zoom step. */
+#doc-viewer[data-zoom="token"]     .grain-token:hover,
+#doc-viewer[data-zoom="clause"]    .grain-clause:hover,
+#doc-viewer[data-zoom="sentence"]  .grain-sentence:hover,
+#doc-viewer[data-zoom="paragraph"] .grain-paragraph:hover,
+#doc-viewer[data-zoom="section"]   .grain-section:hover,
+#doc-viewer[data-zoom="document"]  .grain-document:hover {
+  background: rgba(251,191,36,0.08);
+  outline: 1px solid rgba(251,191,36,0.5);
+  outline-offset: 0px;
+}
+
+/* Selected grain — persistent ring until another grain is clicked.
+   Scoped with `.grain` so it does not collide with the pre-existing
+   `.grain-toggle .grain-btn.grain-active` button styling. */
+.grain.grain-active {
+  background: rgba(251,191,36,0.14);
+  outline: 1px solid rgba(251,191,36,0.9);
+  outline-offset: 0px;
+}
+.grain.grain-active.grain-paragraph,
+.grain.grain-active.grain-section,
+.grain.grain-active.grain-document {
+  outline-offset: 2px;
+}
+
+/* Grain toggle extensions — the toggle is now a zoom preset, spans the
+   full ladder, and includes +/- icons for incremental zoom. */
+.grain-toggle .grain-btn.grain-zoom {
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0;
+  min-width: 22px;
+  text-align: center;
+}
+
+/* Focus inspector sheet — rendered by renderFocusInspector() when a grain
+   cell is clicked. Breadcrumb rungs are clickable zoom-out affordances;
+   child list entries are clickable zoom-in / log-jump affordances. */
+.focus-sheet {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 6px 2px;
+}
+.focus-breadcrumb {
+  display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+  font-size: 11px; color: var(--muted);
+}
+.focus-crumb {
+  cursor: pointer; padding: 2px 6px; border-radius: 3px;
+  border: 1px solid var(--border2);
+  white-space: nowrap; max-width: 160px; overflow: hidden;
+  text-overflow: ellipsis;
+}
+.focus-crumb:hover { color: var(--sig); border-color: var(--sig); }
+.focus-crumb-sep { color: var(--muted); opacity: 0.5; padding: 0 2px; }
+.focus-grain-label {
+  font-size: 10px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--sig);
+}
+.focus-chunk {
+  font-size: 13px; line-height: 1.5;
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.03);
+  border-left: 2px solid var(--sig);
+  border-radius: 2px;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 240px; overflow-y: auto;
+}
+.focus-actions { display: flex; gap: 4px; }
+.focus-cls {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px;
+}
+.focus-cls-op {
+  font-weight: 700; color: var(--sig);
+  padding: 1px 6px; border: 1px solid var(--sig); border-radius: 2px;
+}
+.focus-cls-res { color: var(--muted); }
+.focus-cls-gap { color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+.focus-child {
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 4px 6px; margin: 1px 0;
+  border-left: 2px solid transparent;
+  cursor: pointer; border-radius: 2px;
+  font-size: 11px;
+}
+.focus-child:hover {
+  border-left-color: var(--sig);
+  background: rgba(251,191,36,0.05);
+}
+.focus-child-op {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; letter-spacing: 0.08em;
+  color: var(--muted); min-width: 30px;
+}
+.focus-child-op.op-INS { color: #4e8f62; }
+.focus-child-op.op-SIG { color: #fbbf24; }
+.focus-child-op.op-CON { color: #b87632; }
+.focus-child-op.op-SYN { color: #8a6a9a; }
+.focus-child-op.op-DEF { color: #22d3ee; }
+.focus-child-op.op-EVA { color: #a78bfa; }
+.focus-child-op.op-NUL { color: #f87171; }
+.focus-child-op.op-REC { color: #f472b6; }
+.focus-child-text {
+  color: var(--text);
+  flex: 1; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* Live highlight for query-supporting clauses and inspector focus — the
    doc becomes the result surface, not a side list. */
 .anno-match {
@@ -1256,9 +1379,14 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
         <div class="panel-actions">
           <span id="worker-indicator" class="worker-ind worker-off" title="OPFS worker bridge status">● OPFS</span>
           <div class="grain-toggle" role="group" aria-label="Rendering grain">
-            <button class="grain-btn" data-grain="clause" onclick="setRenderGrain('clause')">Clause</button>
-            <button class="grain-btn grain-active" data-grain="sentence" onclick="setRenderGrain('sentence')">Sentence</button>
-            <button class="grain-btn" data-grain="paragraph" onclick="setRenderGrain('paragraph')">Paragraph</button>
+            <button class="grain-btn grain-zoom" data-grain-act="out" onclick="zoomOut()" title="Zoom out (−)">−</button>
+            <button class="grain-btn" data-grain="token" onclick="setRenderGrain('token')" title="Token grain (1)">Tok</button>
+            <button class="grain-btn" data-grain="clause" onclick="setRenderGrain('clause')" title="Clause grain (2)">Clause</button>
+            <button class="grain-btn grain-active" data-grain="sentence" onclick="setRenderGrain('sentence')" title="Sentence grain (3)">Sentence</button>
+            <button class="grain-btn" data-grain="paragraph" onclick="setRenderGrain('paragraph')" title="Paragraph grain (4)">Paragraph</button>
+            <button class="grain-btn" data-grain="section" onclick="setRenderGrain('section')" title="Section grain (5)">Section</button>
+            <button class="grain-btn" data-grain="document" onclick="setRenderGrain('document')" title="Document grain (6)">Doc</button>
+            <button class="grain-btn grain-zoom" data-grain-act="in" onclick="zoomIn()" title="Zoom in (+)">+</button>
           </div>
           <button onclick="loadSampleA()">Sample A</button>
           <button onclick="loadSampleB()">Sample B</button>
@@ -2550,6 +2678,85 @@ function stageSEG(log, text, da) {
   return result;
 }
 
+// stageSEG_structure emits SEG entries for the coarser grains
+// (paragraph / section / document) so every cell on the grain ladder is a
+// first-class, addressable unit. Anchors are deterministic (keyed on offset
+// + da) so re-ingest is idempotent. Uses the same paragraph/header offset
+// scanner as extractFormatMeta() — colocated here so stageSEG_structure can
+// run at pipeline time without touching OPFS.
+function stageSEG_structure(log, text, da) {
+  // Document-grain SEG — the whole surface as a single addressable cell.
+  log.push(makeEntry('SEG', `doc:${da}`, `doc:${da}`,
+    { type: 'document', text: text.slice(0, 240), span_start: 0, span_end: text.length },
+    { source: 'mechanical:document_seg', span_start: 0, span_end: text.length,
+      doc_anchor: da, confidence: 1.0 }
+  ));
+
+  // Paragraphs — blank-line separated blocks.
+  const paragraphs = [];
+  const paraRe = /\n\s*\n/g;
+  let lastEnd = 0, m;
+  while ((m = paraRe.exec(text)) !== null) {
+    const seg = text.slice(lastEnd, m.index);
+    const trimOffset = seg.length - seg.trimStart().length;
+    const start = lastEnd + trimOffset;
+    const end = start + seg.trim().length;
+    if (end > start) paragraphs.push({ start, end, text: text.slice(start, end) });
+    lastEnd = m.index + m[0].length;
+  }
+  const tail = text.slice(lastEnd);
+  const tailTrim = tail.trim();
+  if (tailTrim.length > 0) {
+    const start = lastEnd + (tail.length - tail.trimStart().length);
+    paragraphs.push({ start, end: start + tailTrim.length, text: tailTrim });
+  }
+  for (const p of paragraphs) {
+    const pa = anchor(`para:${da}:${p.start}`);
+    log.push(makeEntry('SEG', pa, `doc:${da}`,
+      { type: 'paragraph', text: p.text.slice(0, 240),
+        span_start: p.start, span_end: p.end },
+      { source: 'mechanical:paragraph_split', span_start: p.start, span_end: p.end,
+        doc_anchor: da, confidence: 1.0 }
+    ));
+  }
+
+  // Sections — bounded by heading-like lines (Markdown headers or ALL-CAPS).
+  const headers = [];
+  const lines = text.split('\n');
+  let lineStart = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length > 3 && trimmed.length < 120 &&
+        (/^[A-Z][A-Z\s\.\-\:]{4,}$/.test(trimmed) || /^#{1,6}\s/.test(trimmed))) {
+      headers.push({ start: lineStart + line.indexOf(trimmed), text: trimmed });
+    }
+    lineStart += line.length + 1;
+  }
+  if (headers.length > 0) {
+    // If text before the first header is non-empty, treat it as a preamble section.
+    if (headers[0].start > 0 && text.slice(0, headers[0].start).trim().length > 0) {
+      const sa = anchor(`sect:${da}:0`);
+      log.push(makeEntry('SEG', sa, `doc:${da}`,
+        { type: 'section', text: '(preamble)',
+          span_start: 0, span_end: headers[0].start },
+        { source: 'mechanical:section_split', span_start: 0, span_end: headers[0].start,
+          doc_anchor: da, confidence: 0.9 }
+      ));
+    }
+    for (let i = 0; i < headers.length; i++) {
+      const start = headers[i].start;
+      const end = (i + 1 < headers.length) ? headers[i + 1].start : text.length;
+      const sa = anchor(`sect:${da}:${start}`);
+      log.push(makeEntry('SEG', sa, `doc:${da}`,
+        { type: 'section', text: headers[i].text,
+          span_start: start, span_end: end },
+        { source: 'mechanical:section_split', span_start: start, span_end: end,
+          doc_anchor: da, confidence: 0.95 }
+      ));
+    }
+  }
+}
+
 function stageSIG_NPs(log, text, da) {
   // Dispatch: CJK uses character ngram extraction, others use NP chunker
   const nps = (_currentScript === 'cjk')
@@ -3424,9 +3631,10 @@ async function ingest(text, title, source, log) {
   const da = stageINS(log, text, title, source);
   await yieldTick();
 
-  // 2. SEG — sentence + clause boundaries
+  // 2. SEG — sentence + clause boundaries + structural (paragraph/section/document)
   setStage('SEG · segmenting');
   const sentences = stageSEG(log, text, da);
+  stageSEG_structure(log, text, da);
   await yieldTick();
 
   // 3. SIG — NP extraction (universal), pronouns, reframe signals
@@ -3504,6 +3712,17 @@ function assembleChunk(target, grain) {
   if (!target || !state.combined) return null;
   const anc = target.anchor;
   const entries = state.combined.entries();
+
+  // Fast path: the click handler passes explicit span_start/span_end on the
+  // target for every structural grain cell (including synthesized tokens,
+  // which have no SEG entry). Slice directly from the active doc's text.
+  if (typeof target.span_start === 'number' && typeof target.span_end === 'number') {
+    const doc = state.docs[state.activeDoc];
+    if (doc?.text && target.span_end > target.span_start) {
+      const slice = doc.text.slice(target.span_start, target.span_end);
+      if (slice && slice.trim().length > 0) return slice;
+    }
+  }
 
   // Prefer a SEG entry for this anchor — it carries normalized clause /
   // sentence / doc text plus span coords.
@@ -3848,6 +4067,253 @@ window._position = _position;
 window._depth = _depth;
 
 // ═══════════════════════════════════════════════════════
+// FOCUS INSPECTOR — grain-aware sheet driven by selectTarget
+// ═══════════════════════════════════════════════════════
+// Renders into the right-panel digest-body. Shows the grain breadcrumb,
+// the chunk text at the clicked grain, any operator classification already
+// known for it, and a child breakdown (contained sub-grains + operator hits
+// whose spans fall within the selected range). The user "zooms and gets
+// information about it" by clicking grain cells and breadcrumb rungs.
+
+const _FOCUS_GRAIN_ORDER = ['document','section','paragraph','sentence','clause','token'];
+let _focusTarget = null;
+
+function _escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Walk up the structural SEG tree to build a breadcrumb from doc → token.
+// We lean on span containment: the innermost SEG whose range wraps the
+// target, per grain tier, is that tier's crumb.
+function _buildGrainBreadcrumb(target) {
+  if (!state.combined) return [];
+  const entries = state.combined.entries();
+  const s = target.span_start, e = target.span_end;
+  const doc = state.docs[state.activeDoc];
+  const da = doc?.doc_anchor;
+
+  // Collect candidate SEG entries by grain.
+  const byGrain = {};
+  for (const en of entries) {
+    if (en.op !== 'SEG') continue;
+    const t = en.operand?.type;
+    if (!t) continue;
+    if (en.provenance?.doc_anchor && da && en.provenance.doc_anchor !== da) continue;
+    (byGrain[t] = byGrain[t] || []).push(en);
+  }
+
+  const crumbs = [];
+  for (const g of _FOCUS_GRAIN_ORDER) {
+    if (g === 'token') continue; // token has no SEG; added separately
+    const pool = byGrain[g] || [];
+    // For document grain with no specific SEG entry, fall back to the doc record.
+    if (g === 'document') {
+      const docSeg = pool.find(en =>
+        (en.provenance?.span_start ?? 0) <= (s ?? 0) &&
+        (en.provenance?.span_end ?? Infinity) >= (e ?? 0));
+      if (docSeg) {
+        crumbs.push({
+          grain: 'document',
+          anchor: docSeg.anchor,
+          span_start: docSeg.provenance?.span_start ?? 0,
+          span_end: docSeg.provenance?.span_end ?? (doc?.text?.length ?? 0),
+          label: doc?.title || 'document',
+        });
+      } else if (doc) {
+        crumbs.push({
+          grain: 'document',
+          anchor: da,
+          span_start: 0,
+          span_end: doc.text?.length || 0,
+          label: doc.title || 'document',
+        });
+      }
+      continue;
+    }
+    // Smallest SEG of this grain that contains [s, e].
+    let best = null;
+    for (const en of pool) {
+      const ps = en.provenance?.span_start, pe = en.provenance?.span_end;
+      if (ps == null || pe == null) continue;
+      if (s == null || e == null) continue;
+      if (ps <= s && pe >= e) {
+        if (!best || (pe - ps) < (best.provenance.span_end - best.provenance.span_start)) {
+          best = en;
+        }
+      }
+    }
+    if (best) {
+      crumbs.push({
+        grain: g,
+        anchor: best.anchor,
+        span_start: best.provenance.span_start,
+        span_end: best.provenance.span_end,
+        label: best.operand?.text?.slice(0, 48) || g,
+      });
+    }
+  }
+  return crumbs;
+}
+
+// Children of the selected grain: SEG entries of the next-inner grain whose
+// span is strictly inside the target, plus any operator annotations in range.
+function _buildGrainChildren(target) {
+  if (!state.combined) return { segs: [], annos: [] };
+  const entries = state.combined.entries();
+  const s = target.span_start, e = target.span_end;
+  if (s == null || e == null) return { segs: [], annos: [] };
+
+  const grainIdx = _FOCUS_GRAIN_ORDER.indexOf(target.grain || target.kind);
+  const childGrain = (grainIdx >= 0 && grainIdx < _FOCUS_GRAIN_ORDER.length - 1)
+    ? _FOCUS_GRAIN_ORDER[grainIdx + 1] : null;
+
+  const segs = [];
+  const annos = [];
+  for (const en of entries) {
+    const ps = en.provenance?.span_start, pe = en.provenance?.span_end;
+    if (ps == null || pe == null) continue;
+    if (ps < s || pe > e) continue;
+    if (ps === s && pe === e) continue;
+    if (en.op === 'SEG') {
+      if (childGrain && en.operand?.type === childGrain) segs.push(en);
+    } else {
+      annos.push(en);
+    }
+  }
+  segs.sort((a,b) => a.provenance.span_start - b.provenance.span_start);
+  annos.sort((a,b) => a.provenance.span_start - b.provenance.span_start);
+  return { segs, annos: annos.slice(0, 60) };
+}
+
+// Locate any classification result already recorded for this target+grain
+// by readOnFocus, so the inspector shows the operator/site/resolution.
+function _lookupClassification(target) {
+  if (!state.combined || !target?.anchor) return null;
+  const g = target.grain || target.kind;
+  const entries = state.combined.entries();
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const en = entries[i];
+    if (en.op !== 'EVA') continue;
+    if (en.target !== target.anchor) continue;
+    if (en.operand?.eva_type !== 'embedding_classification') continue;
+    if (g && en.operand?.grain !== g) continue;
+    return en.operand;
+  }
+  return null;
+}
+
+function renderFocusInspector(target) {
+  if (!target || !target.anchor) return;
+  _focusTarget = target;
+  const body = document.getElementById('digest-body');
+  if (!body) return;
+
+  const digestPan = document.getElementById('digest-panel');
+  if (digestPan && !digestPan.classList.contains('visible')) {
+    // Surface the right panel so the inspector is visible when a user
+    // clicks a grain cell for the first time in a session.
+    digestPan.classList.add('visible');
+  }
+
+  const grain = target.grain || target.kind || 'span';
+  const doc = state.docs[state.activeDoc];
+  let chunkText = '';
+  if (typeof target.span_start === 'number' && typeof target.span_end === 'number' && doc?.text) {
+    chunkText = doc.text.slice(target.span_start, target.span_end);
+  } else {
+    try { chunkText = assembleChunk(target, grain) || ''; } catch {}
+  }
+
+  const crumbs = _buildGrainBreadcrumb(target);
+  const { segs: childSegs, annos: childAnnos } = _buildGrainChildren(target);
+  const cls = _lookupClassification(target);
+
+  const crumbHTML = crumbs.map(c => `
+    <span class="focus-crumb"
+          onclick="selectTarget({anchor:'${_escHtml(c.anchor)}',kind:'${c.grain}',grain:'${c.grain}',span_start:${c.span_start},span_end:${c.span_end}}); setRenderGrain('${c.grain}')"
+          title="Zoom to ${c.grain}">${_escHtml(c.label || c.grain)}</span>
+  `).join('<span class="focus-crumb-sep">▸</span>');
+
+  const childSegsHTML = childSegs.length ? `
+    <div class="dig-section">
+      <div class="dig-h">Contains ${childSegs.length} ${childSegs[0].operand?.type || 'unit'}${childSegs.length !== 1 ? 's' : ''}</div>
+      ${childSegs.slice(0, 40).map(en => {
+        const t = en.operand?.text?.slice(0, 80) || '';
+        const ps = en.provenance.span_start, pe = en.provenance.span_end;
+        const cg = en.operand?.type || 'unit';
+        return `<div class="focus-child"
+                     onclick="selectTarget({anchor:'${_escHtml(en.anchor)}',kind:'${cg}',grain:'${cg}',span_start:${ps},span_end:${pe}}); setRenderGrain('${cg}')">
+          <span class="focus-child-op">${cg.slice(0,3).toUpperCase()}</span>
+          <span class="focus-child-text">${_escHtml(t)}</span>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  const childAnnosHTML = childAnnos.length ? `
+    <div class="dig-section">
+      <div class="dig-h">${childAnnos.length} operator hit${childAnnos.length !== 1 ? 's' : ''} in range</div>
+      ${childAnnos.slice(0, 40).map(en => {
+        const t = (doc?.text || '').slice(en.provenance.span_start, en.provenance.span_end).slice(0, 80);
+        return `<div class="focus-child"
+                     onclick="jumpToLogId('${_escHtml(en.log_id)}')">
+          <span class="focus-child-op op-${en.op}">${en.op}</span>
+          <span class="focus-child-text">${_escHtml(t || en.operand?.text || en.operand?.normalized || '')}</span>
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  const clsHTML = cls ? `
+    <div class="dig-section">
+      <div class="dig-h">Classification</div>
+      <div class="focus-cls">
+        <span class="focus-cls-op">${_escHtml(cls.operator || '?')}</span>
+        <span class="focus-cls-res">(${_escHtml(cls.site || '?')}, ${_escHtml(cls.resolution || '?')})</span>
+        ${cls.confidence_gap != null ? `<span class="focus-cls-gap">Δ=${Number(cls.confidence_gap).toFixed(2)}</span>` : ''}
+      </div>
+    </div>` : '';
+
+  body.innerHTML = `
+    <div class="focus-sheet">
+      <div class="focus-breadcrumb">${crumbHTML || '<em>no breadcrumb</em>'}</div>
+      <div class="focus-grain-label">${_escHtml(grain)}</div>
+      <div class="focus-chunk">${_escHtml(chunkText.slice(0, 1200))}${chunkText.length > 1200 ? '…' : ''}</div>
+      <div class="focus-actions">
+        <button class="dbtn" onclick="zoomOut()" title="Zoom out">−</button>
+        <button class="dbtn" onclick="zoomIn()" title="Zoom in">+</button>
+        <button class="dbtn" onclick="(async()=>{try{const r=await readOnFocus(_focusTarget,'${grain}');renderFocusInspector(_focusTarget);}catch(e){}})()" title="Classify this chunk">read now</button>
+      </div>
+      ${clsHTML}
+      ${childSegsHTML}
+      ${childAnnosHTML}
+    </div>
+  `;
+
+  // If we don't have a classification yet, kick one off in the background.
+  // readOnFocus is idempotent — it no-ops when the (anchor,grain,posHash)
+  // tuple already has an INS/EVA recorded.
+  if (!cls && grain !== 'token' && target.anchor && window.EOClassifier?.isReady?.()) {
+    try {
+      readOnFocus(target, grain).then(() => {
+        if (_focusTarget && _focusTarget.anchor === target.anchor) {
+          renderFocusInspector(_focusTarget);
+        }
+      }).catch(() => {});
+    } catch {}
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.renderFocusInspector = renderFocusInspector;
+  // Make the focus target visible to inline onclick strings in the sheet.
+  Object.defineProperty(window, '_focusTarget', {
+    get() { return _focusTarget; },
+    configurable: true,
+  });
+}
+
+// ═══════════════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════════════
 
@@ -4103,6 +4569,10 @@ async function storeResolvedSpans(log, docAnchor) {
         entity_anchor: e.target === 'entity-registry' ? e.anchor :
                        (typeof e.target === 'string' && e.target.startsWith('@')) ? e.target : null,
         detector: e.operand?.detector,
+        // Carry the SEG subtype (document/section/paragraph/sentence/clause)
+        // so the renderer can tile structural grain wrappers directly from
+        // the stored ndjson without re-deriving from raw text.
+        seg_type: e.op === 'SEG' ? (e.operand?.type || null) : null,
       }));
 
     const root = await navigator.storage.getDirectory();
@@ -4144,26 +4614,65 @@ async function renderDocumentFromOPFS(docAnchor, grain = 'sentence', activeSpanI
       spans = spansText.split('\n').filter(l => l.trim()).map(l => {
         try { return JSON.parse(l); } catch { return null; }
       }).filter(Boolean)
-        .filter(s => grainFilter(s, grain))
         .sort((a,b) => a.span_start - b.span_start);
     } catch {}
 
-    return buildAnnotatedHTML(rawText, meta, spans, activeSpanId, grain);
+    return buildAnnotatedHTML(rawText, meta, spans, activeSpanId, grain, docAnchor);
   } catch (err) {
     console.warn('renderDocumentFromOPFS failed:', err);
     return null;
   }
 }
 
-function grainFilter(span, grain) {
-  if (grain === 'clause') return true;
-  if (grain === 'sentence')  return ['INS','CON','SYN','DEF','EVA','NUL','REC'].includes(span.op);
-  if (grain === 'paragraph') return ['INS','SYN','DEF','REC'].includes(span.op);
-  return true;
-}
+// grainFilter is now a no-op — the structural grain layer makes every unit
+// of the ladder visible simultaneously, and the zoom level is surfaced via
+// CSS (`#doc-viewer[data-zoom=...]`) rather than by filtering spans out of
+// the render. Kept as an identity for any remaining legacy call sites.
+function grainFilter(_span, _grain) { return true; }
 
-function buildAnnotatedHTML(rawText, meta, spans, activeSpanId, _grain) {
-  const events = buildNestingOrder(spans);
+// Grain depth — determines nesting priority when structural wrappers and
+// operator annotations share offsets. Outer grains must open first and
+// close last. Anno spans are innermost so they paint inside the structural
+// skeleton without breaking its nesting.
+const _GRAIN_DEPTH = {
+  document: 0, section: 1, paragraph: 2, sentence: 3, clause: 4, token: 5,
+};
+
+function buildAnnotatedHTML(rawText, meta, spans, activeSpanId, zoomGrain, docAnchor) {
+  // Partition incoming spans. SEG spans (with a known seg_type in the
+  // ladder) become structural grain wrappers; everything else is an
+  // operator annotation layer painted inside the structural skeleton.
+  const structural = [];
+  const annos = [];
+  for (const s of spans) {
+    if (s.op === 'SEG' && s.seg_type && _GRAIN_DEPTH[s.seg_type] != null) {
+      structural.push({ ...s, _kind: 'grain', _grain: s.seg_type,
+                        _priority: _GRAIN_DEPTH[s.seg_type] });
+    } else if (s.op !== 'SEG') {
+      annos.push({ ...s, _kind: 'anno', _priority: 10 });
+    }
+  }
+
+  // Synthesize token-grain wrappers from the raw text so every word is a
+  // click target even though we don't store per-token SEG entries.
+  if (typeof tokenize === 'function' && rawText) {
+    try {
+      for (const t of tokenize(rawText)) {
+        if (t.end > t.start) {
+          structural.push({
+            _kind: 'grain', _grain: 'token', _priority: _GRAIN_DEPTH.token,
+            span_start: t.start, span_end: t.end,
+            anchor: `tok:${docAnchor || 'doc'}:${t.start}`,
+            seg_type: 'token',
+          });
+        }
+      }
+    } catch {}
+  }
+
+  const all = structural.concat(annos);
+  const events = buildNestingOrder(all);
+
   let html = '';
   let pos = 0;
   const _escape = (s) => s
@@ -4176,16 +4685,25 @@ function buildAnnotatedHTML(rawText, meta, spans, activeSpanId, _grain) {
         html += _escape(rawText.slice(pos, ev.span.span_start));
         pos = ev.span.span_start;
       }
-      const op = (ev.span.op || '').toLowerCase();
-      const conf = ev.span.confidence || 0.5;
-      const opacity = Math.max(0.15, conf * 0.6);
-      const isActive = ev.span.log_id === activeSpanId;
-      html += `<span class="anno anno-${op}${isActive ? ' anno-active' : ''}"`
-           +  ` style="background:${opColor(ev.span.op, opacity)}"`
-           +  ` data-log-id="${ev.span.log_id}"`
-           +  ` data-anchor="${ev.span.entity_anchor || ev.span.anchor}"`
-           +  ` data-op="${ev.span.op}"`
-           +  ` data-confidence="${conf.toFixed(2)}">`;
+      const s = ev.span;
+      if (s._kind === 'grain') {
+        html += `<span class="grain grain-${s._grain}"`
+             +  ` data-grain="${s._grain}"`
+             +  ` data-anchor="${_escape(s.anchor || '')}"`
+             +  ` data-span-start="${s.span_start}"`
+             +  ` data-span-end="${s.span_end}">`;
+      } else {
+        const op = (s.op || '').toLowerCase();
+        const conf = s.confidence || 0.5;
+        const opacity = Math.max(0.15, conf * 0.6);
+        const isActive = s.log_id === activeSpanId;
+        html += `<span class="anno anno-${op}${isActive ? ' anno-active' : ''}"`
+             +  ` style="background:${opColor(s.op, opacity)}"`
+             +  ` data-log-id="${s.log_id}"`
+             +  ` data-anchor="${_escape(s.entity_anchor || s.anchor || '')}"`
+             +  ` data-op="${s.op}"`
+             +  ` data-confidence="${conf.toFixed(2)}">`;
+      }
     } else if (ev.type === 'close') {
       if (ev.span.span_end > pos) {
         html += _escape(rawText.slice(pos, ev.span.span_end));
@@ -4216,9 +4734,15 @@ function opColor(op, opacity) {
 function buildNestingOrder(spans) {
   const events = [];
   const stack = [];
+  // Sort order:
+  //   1. earlier start first
+  //   2. at the same start, larger span opens first (outer first)
+  //   3. tie-break on _priority so document → section → paragraph →
+  //      sentence → clause → token → anno is a stable nesting.
   const sorted = spans.slice().sort((a,b) =>
     a.span_start - b.span_start ||
-    (b.span_end - b.span_start) - (a.span_end - a.span_start)
+    (b.span_end - b.span_start) - (a.span_end - a.span_start) ||
+    ((a._priority ?? 10) - (b._priority ?? 10))
   );
   for (const span of sorted) {
     while (stack.length && stack[stack.length-1].span_end <= span.span_start) {
@@ -4801,50 +5325,110 @@ function newDoc() {
   document.getElementById('doc-input').focus();
 }
 
-// Active rendering grain — toggled by UI below. Defaults to sentence; the
-// OPFS renderer filters span events accordingly (clause ⊃ sentence ⊃
-// paragraph in terms of how much detail bleeds through).
+// ── Grain ladder + zoom controller ────────────────────────────
+//
+// The document is rendered with nested structural wrappers — token inside
+// clause inside sentence inside paragraph inside section inside document —
+// and the zoom level determines which tier is the primary click target
+// (via [data-zoom] on the viewer, wired in CSS above).
+
+const ZOOM_ORDER = ['token','clause','sentence','paragraph','section','document'];
 let currentGrain = 'sentence';
 
-// Delegated click handler on the annotated doc viewer: clicking a span
-// highlights the corresponding log entry + scrolls it into view. Reads
-// the data-log-id attribute the OPFS renderer already emits.
+function _applyZoomUI() {
+  const viewer = document.getElementById('doc-viewer');
+  if (viewer) viewer.dataset.zoom = currentGrain;
+  document.querySelectorAll('.grain-toggle .grain-btn').forEach(btn => {
+    btn.classList.toggle('grain-active', btn.dataset.grain === currentGrain);
+  });
+}
+
+// Delegated click handler on the annotated doc viewer. Two layers to target:
+//   • `.grain-*` structural wrappers — token / clause / sentence / paragraph
+//     / section / document. Priority: deepest grain at current zoom level,
+//     falling back outward so a click always hits something sensible.
+//   • `.anno` operator annotations nested inside the grain skeleton. If the
+//     click landed inside an anno, surface its log entry too.
 function wireDocViewerClicks() {
   const viewer = document.getElementById('doc-viewer');
   if (!viewer || viewer._eoClickBound) return;
   viewer._eoClickBound = true;
   viewer.addEventListener('click', (ev) => {
-    const span = ev.target.closest('.anno');
-    if (!span) return;
-    const logId = span.dataset.logId;
-    if (!logId) return;
-    // Clear previous highlight.
-    document.querySelectorAll('.anno.anno-active')
-      .forEach(s => s.classList.remove('anno-active'));
-    span.classList.add('anno-active');
-    // Find + highlight the matching log entry.
-    if (!state.combined) return;
-    const entries = state.combined.entries();
-    const idx = entries.findIndex(e => e.log_id === logId);
-    if (idx < 0) return;
-    const row = document.querySelector(`.log-entry[data-idx="${idx}"]`);
-    if (row) {
-      document.querySelectorAll('.log-entry.log-entry-active')
-        .forEach(r => r.classList.remove('log-entry-active'));
-      row.classList.add('log-entry-active');
-      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Walk outward from zoom level to the document root.
+    const startIdx = ZOOM_ORDER.indexOf(currentGrain);
+    const preferred = (startIdx >= 0)
+      ? ZOOM_ORDER.slice(startIdx)
+      : ZOOM_ORDER.slice();
+    let grainEl = null, grainHit = null;
+    for (const g of preferred) {
+      grainEl = ev.target.closest(`.grain-${g}`);
+      if (grainEl) { grainHit = g; break; }
     }
-    // click = SIG: establish the target, open the inspector, let the depth
-    // controller handle reads. The target is the SEG/SIG anchor for the
-    // clicked span (preferred over the log entry's own anchor because
-    // spans are the structural unit; log entries are the event that
-    // produced them).
-    const entry = entries[idx];
-    const targetAnchor = entry?.anchor;
-    if (targetAnchor) {
-      try { selectTarget({ anchor: targetAnchor, kind: 'span', logId, idx }); } catch {}
+
+    // Also capture any operator annotation under the pointer.
+    const annoEl = ev.target.closest('.anno');
+    const logId = annoEl?.dataset?.logId || null;
+
+    if (!grainEl && !annoEl) return;
+
+    // Paint active outlines. Scope the grain-active class to `.grain`
+    // elements so we don't strip the class from the toggle button, which
+    // reuses the same name for its selected state.
+    document.querySelectorAll('.grain.grain-active')
+      .forEach(n => n.classList.remove('grain-active'));
+    document.querySelectorAll('.anno.anno-active')
+      .forEach(n => n.classList.remove('anno-active'));
+    if (grainEl) grainEl.classList.add('grain-active');
+    if (annoEl)  annoEl.classList.add('anno-active');
+
+    // Surface the matching log entry row, if any.
+    if (logId && state.combined) {
+      const entries = state.combined.entries();
+      const idx = entries.findIndex(e => e.log_id === logId);
+      if (idx >= 0) {
+        const row = document.querySelector(`.log-entry[data-idx="${idx}"]`);
+        if (row) {
+          document.querySelectorAll('.log-entry.log-entry-active')
+            .forEach(r => r.classList.remove('log-entry-active'));
+          row.classList.add('log-entry-active');
+          row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
+    }
+
+    // Build the selection target. Prefer the structural grain anchor so
+    // selectTarget → readOnFocus can classify the chunk at this grain; fall
+    // back to the anno's anchor when only the operator layer was hit.
+    let target = null;
+    if (grainEl) {
+      target = {
+        anchor: grainEl.dataset.anchor,
+        kind: grainHit,
+        grain: grainHit,
+        span_start: +grainEl.dataset.spanStart,
+        span_end:   +grainEl.dataset.spanEnd,
+        logId: logId || undefined,
+      };
+    } else if (annoEl) {
+      target = {
+        anchor: annoEl.dataset.anchor,
+        kind: 'anno',
+        logId,
+      };
+    }
+    if (target?.anchor) {
+      try { selectTarget(target); } catch (err) { console.warn('selectTarget failed:', err); }
     }
   });
+
+  // Ctrl/Cmd + wheel on the viewer = zoom in/out along the grain ladder.
+  // Plain wheel still feeds the depth controller in installDepthScrollHandler.
+  viewer.addEventListener('wheel', (ev) => {
+    if (!(ev.ctrlKey || ev.metaKey)) return;
+    ev.preventDefault();
+    if (ev.deltaY < 0) zoomIn();
+    else if (ev.deltaY > 0) zoomOut();
+  }, { passive: false });
 }
 
 function renderDocViewer() {
@@ -4853,32 +5437,53 @@ function renderDocViewer() {
   const viewer = document.getElementById('doc-viewer');
   // Plain-text fallback so the viewer always shows _something_ instantly.
   viewer.innerHTML = escapeHtml(doc.text);
+  _applyZoomUI();
   // Overlay the OPFS-backed annotated render when available. Silent no-op
   // when workers/OPFS aren't ready (e.g. loaded from file://).
   renderDocumentFromOPFS(doc.doc_anchor, currentGrain).then(html => {
     if (typeof html === 'string' && html.length > 0) {
       viewer.innerHTML = html;
+      _applyZoomUI();
       wireDocViewerClicks();
     }
   }).catch(() => {});
 }
 
-// Expose a grain switcher for consoles / keyboard shortcut wiring. Press
-// 1/2/3 in the ingest view to flip between clause / sentence / paragraph.
+// Zoom controller — the grain toggle is now a zoom preset, not a filter.
+// Changing zoom re-paints the CSS gating (which grain reacts to hover) and,
+// if a target is pinned, re-classifies it at the new grain so the inspector
+// updates.
 if (typeof window !== 'undefined') {
   window.setRenderGrain = function setRenderGrain(g) {
-    if (!['clause','sentence','paragraph'].includes(g)) return;
+    if (!ZOOM_ORDER.includes(g)) return;
+    const changed = currentGrain !== g;
     currentGrain = g;
-    document.querySelectorAll('.grain-toggle .grain-btn').forEach(btn => {
-      btn.classList.toggle('grain-active', btn.dataset.grain === g);
-    });
-    try { renderDocViewer(); } catch {}
+    _applyZoomUI();
+    if (changed && _depth?.target?.anchor) {
+      try {
+        selectTarget({ ..._depth.target, grain: g });
+      } catch {}
+    }
+  };
+  window.zoomIn  = function zoomIn()  {
+    const i = ZOOM_ORDER.indexOf(currentGrain);
+    if (i > 0) window.setRenderGrain(ZOOM_ORDER[i - 1]);
+  };
+  window.zoomOut = function zoomOut() {
+    const i = ZOOM_ORDER.indexOf(currentGrain);
+    if (i >= 0 && i < ZOOM_ORDER.length - 1) window.setRenderGrain(ZOOM_ORDER[i + 1]);
   };
   window.addEventListener('keydown', (e) => {
     if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
-    if (e.key === '1') window.setRenderGrain('clause');
-    else if (e.key === '2') window.setRenderGrain('sentence');
-    else if (e.key === '3') window.setRenderGrain('paragraph');
+    const key = e.key;
+    if (key === '1') window.setRenderGrain('token');
+    else if (key === '2') window.setRenderGrain('clause');
+    else if (key === '3') window.setRenderGrain('sentence');
+    else if (key === '4') window.setRenderGrain('paragraph');
+    else if (key === '5') window.setRenderGrain('section');
+    else if (key === '6') window.setRenderGrain('document');
+    else if (key === '+' || key === '=') window.zoomIn();
+    else if (key === '-' || key === '_') window.zoomOut();
   });
 }
 
