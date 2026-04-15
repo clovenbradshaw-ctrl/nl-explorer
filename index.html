@@ -361,6 +361,129 @@ button:hover { border-color: var(--sig); color: var(--sig); }
 .op-ticker .tk-verb { color: var(--muted, #8a8f98); margin-right: 6px; }
 .op-ticker .tk-subj { color: var(--text, #e8ecf5); }
 
+/* ── Performance HUD ─────────────────────────────────────
+   Adaptive workload meter + live operator-notation stream.
+   Sits bottom-right, fades in automatically whenever the main
+   thread is doing work. Shows the user *how hard* the pipeline
+   is thinking and *what* it's thinking in EO notation. Hidden
+   (but mountable) at rest so it never covers inspection UI. */
+.perf-hud {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  width: 300px;
+  max-width: 44vw;
+  background: rgba(11,12,14,0.9);
+  border: 1px solid var(--border2, #2a2d38);
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: var(--text);
+  z-index: 9000;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+  backdrop-filter: blur(4px);
+  box-shadow: 0 4px 18px rgba(0,0,0,0.45);
+}
+.perf-hud.perf-hud-active { opacity: 1; pointer-events: auto; }
+.perf-hud.perf-hud-pinned { opacity: 1 !important; pointer-events: auto; }
+.perf-hud-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border, #1e2128);
+}
+.perf-hud-meter {
+  flex: 0 0 60px;
+  height: 6px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+.perf-hud-fill {
+  height: 100%;
+  width: 0%;
+  background: hsl(120,70%,48%);
+  transition: width 120ms linear, background 180ms linear;
+}
+.perf-hud-stats {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  color: var(--muted, #8a8f98);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  align-items: baseline;
+  min-width: 0;
+}
+.perf-hud-stats > span { white-space: nowrap; }
+.perf-hud-stats #perf-hud-load { color: var(--bright); font-weight: 600; min-width: 32px; }
+.perf-hud-stats #perf-hud-queue {
+  color: var(--seg, #60a5fa);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+.perf-hud-pin {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border2);
+  border-radius: 3px;
+  font-size: 10px;
+  cursor: pointer;
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  line-height: 1;
+}
+.perf-hud-pin:hover { color: var(--bright); }
+.perf-hud-stream {
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 4px 8px 6px;
+  font-size: 10px;
+  line-height: 1.55;
+  scroll-behavior: smooth;
+}
+.perf-hud-stream .ph-row {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity 400ms ease;
+}
+.perf-hud-stream .ph-op {
+  display: inline-block;
+  width: 34px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+.perf-hud-stream .ph-op-INS { color: #4e8f62; }
+.perf-hud-stream .ph-op-SEG { color: #60a5fa; }
+.perf-hud-stream .ph-op-SIG { color: #fbbf24; }
+.perf-hud-stream .ph-op-CON { color: #fb923c; }
+.perf-hud-stream .ph-op-SYN { color: #8a6a9a; }
+.perf-hud-stream .ph-op-DEF { color: #22d3ee; }
+.perf-hud-stream .ph-op-EVA { color: #a78bfa; }
+.perf-hud-stream .ph-op-NUL { color: #f87171; }
+.perf-hud-stream .ph-op-REC { color: #f472b6; }
+.perf-hud-stream .ph-detail { color: var(--text); margin-left: 6px; }
+.perf-hud-stream .ph-notation {
+  color: var(--muted);
+  font-style: italic;
+  margin-left: 4px;
+}
+.perf-hud-empty {
+  padding: 10px;
+  text-align: center;
+  color: var(--muted);
+  font-style: italic;
+}
+
 /* Structural grain cells — every word/clause/sentence/paragraph/section/
    document is a clickable hit target. Default has no decoration so plain
    text still reads as plain text; decoration appears on hover at the
@@ -1544,6 +1667,23 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
            each ingest. Filtered entity count uses `isDisplayableEntity`. -->
       <div class="corpus-header" id="corpus-header" style="display:none;"></div>
 
+      <!-- Performance HUD — workload meter + operator-notation stream.
+           Materialized in main-panel so it flows with the shell but is
+           position:fixed; visibility is driven entirely by perfMonitor. -->
+      <div class="perf-hud" id="perf-hud" aria-hidden="true" title="Pipeline load · click pin to keep visible">
+        <div class="perf-hud-bar">
+          <div class="perf-hud-meter"><div class="perf-hud-fill" id="perf-hud-fill"></div></div>
+          <div class="perf-hud-stats">
+            <span id="perf-hud-load" title="Main-thread utilization">0%</span>
+            <span id="perf-hud-lt" title="Long tasks (>50ms) since load">0 LT</span>
+            <span id="perf-hud-ops" title="Operator events per second">0 op/s</span>
+            <span id="perf-hud-queue" title="Current pipeline stage">idle</span>
+          </div>
+          <button class="perf-hud-pin" id="perf-hud-pin" onclick="perfMonitor.togglePin()" title="Pin HUD visible">⎘</button>
+        </div>
+        <div class="perf-hud-stream" id="perf-hud-stream"></div>
+      </div>
+
       <div class="doc-area" id="doc-area">
         <div class="drop-zone visible" id="drop-zone" onclick="document.getElementById('file-input').click()">
           <div class="drop-zone-icon">⬇</div>
@@ -2083,27 +2223,48 @@ async function classifyClauses(clauses, script, mechOps, onProgress) {
   }
   if (onProgress) onProgress(total - toEmbed.length, total);
 
-  // Wave 1 — embed + classify in chunked batches
+  // Wave 1 — embed + classify in chunked batches. Uses the adaptive
+  // throttle so the UI stays responsive even when the embedder falls
+  // back to a slower path. Streams each classification into the HUD as
+  // an EVA operator-notation row so the user sees the model thinking.
   let done = total - toEmbed.length;
-  for (let b = 0; b < toEmbed.length; b += BATCH) {
-    const slice = toEmbed.slice(b, b + BATCH);
-    for (const { i, key } of slice) {
-      const r = await classifyClause(clauses[i].text, script, mechOps?.[i]);
-      results[i] = r;
-      // Cache a mech-independent copy
-      const cacheable = { ...r };
-      delete cacheable.mechanical_operator;
-      delete cacheable.agreement;
-      _cacheIndex?.set(key, cacheable);
-      _cacheDirty++;
-      done++;
-      if (onProgress) onProgress(done, total);
+  const _pm = typeof perfMonitor !== 'undefined' ? perfMonitor : null;
+  if (_pm) _pm.queueIn(`classify ${toEmbed.length}`);
+  try {
+    for (let b = 0; b < toEmbed.length; b += BATCH) {
+      const slice = toEmbed.slice(b, b + BATCH);
+      for (const { i, key } of slice) {
+        const r = await classifyClause(clauses[i].text, script, mechOps?.[i]);
+        results[i] = r;
+        // Cache a mech-independent copy
+        const cacheable = { ...r };
+        delete cacheable.mechanical_operator;
+        delete cacheable.agreement;
+        _cacheIndex?.set(key, cacheable);
+        _cacheDirty++;
+        done++;
+        if (onProgress) onProgress(done, total);
+        if (_pm && r && r.operator) {
+          _pm.tickOp();
+          _pm.pushStream(
+            'EVA',
+            (clauses[i].text || '').slice(0, 32),
+            `${r.operator}(${r.resolution || '?'}, ${r.site || '?'})`
+          );
+          // Inner-loop adaptive yield: bails out quickly when the
+          // embedder is fast, inserts a macrotask when it isn't.
+          if (_pm.due()) await _pm.yieldNow();
+        }
+      }
+      // Barrier: flush cache, release slice references, honest yield.
+      if (_cacheDirty >= BATCH) await cacheFlush();
+      if (_pm) await _pm.yieldIfNeeded(`classify ${done}/${total}`);
+      else await new Promise(r => setTimeout(r, 0));
     }
-    // Barrier: flush cache, yield to UI, release slice references
-    if (_cacheDirty >= BATCH) await cacheFlush();
-    await new Promise(r => setTimeout(r, 0));
+    await cacheFlush();
+  } finally {
+    if (_pm) _pm.queueOut();
   }
-  await cacheFlush();
   return results;
 }
 
@@ -2179,6 +2340,294 @@ initClassifier('centroids.json').then((ready) => {
 <script src="workers/query.js"></script>
 
 <script>
+// ═══════════════════════════════════════════════════════════════
+// PERFORMANCE MONITOR — adaptive throttle + workload HUD
+// ---------------------------------------------------------------
+// The pipeline used to freeze the page even on tiny inputs because
+// several stages run synchronous O(n) loops between `await`s and
+// the renderers blast multi-MB innerHTML payloads in one shot.
+// perfMonitor gives every hot path a cheap cooperative-yield call
+// and drives a visible HUD so the user can see *how hard* the
+// engine is working and *what* it's thinking in EO notation.
+//
+//   await perfMonitor.yieldIfNeeded(label)   // polite yield
+//   if (perfMonitor.due()) await perfMonitor.yieldNow()  // tight loops
+//   perfMonitor.queueIn(label) / queueOut()  // stage bracket
+//   perfMonitor.pushStream(op, detail, notation)         // ticker
+//   perfMonitor.tickOp()                     // op throughput counter
+// ═══════════════════════════════════════════════════════════════
+const perfMonitor = (() => {
+  const FRAME_BUDGET_MS = 12;   // yield once a task burns ~1 frame
+  const SLOW_BUDGET_MS  = 50;   // tasks above this count as long
+  const EMA_ALPHA       = 0.25;
+  const STREAM_MAX      = 60;
+
+  const _now = () => (typeof performance !== 'undefined' && performance.now)
+                      ? performance.now() : Date.now();
+
+  let lastYieldAt     = _now();
+  let load            = 0;      // 0..1 EMA of main-thread saturation
+  let longTaskCount   = 0;
+  let opsThisWindow   = 0;
+  let opsPerSec       = 0;
+  let lastOpsTick     = lastYieldAt;
+  let activeTaskLabel = 'idle';
+  let activeQueue     = 0;
+  let pinned          = false;
+  const streamRing    = [];
+
+  // PerformanceObserver: long-task entries are a direct ground-truth
+  // signal that a chunk of JS blew past 50ms without yielding. Bump
+  // the load meter hard so the HUD is honest about those moments.
+  try {
+    if (typeof PerformanceObserver === 'function') {
+      const po = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) {
+          longTaskCount++;
+          load = Math.min(1, load + Math.min(0.4, entry.duration / 400));
+        }
+        _scheduleHudUpdate();
+      });
+      po.observe({ entryTypes: ['longtask'] });
+    }
+  } catch {}
+
+  // Cooperative yield: returns a Promise only when the frame budget is
+  // exceeded, so call sites can `await perfMonitor.yieldIfNeeded()`
+  // unconditionally without paying Promise setup per iteration on the
+  // fast path. Updates the EMA load sample on every call.
+  async function yieldIfNeeded(label) {
+    if (label) activeTaskLabel = label;
+    const t = _now();
+    const elapsed = t - lastYieldAt;
+    // Saturation sample: elapsed/budget clipped to [0, 2]; target load
+    // is ~0.5 when the budget is exactly met each tick.
+    const sample = Math.min(2, elapsed / FRAME_BUDGET_MS);
+    load = load * (1 - EMA_ALPHA) + sample * EMA_ALPHA * 0.5;
+    if (elapsed > FRAME_BUDGET_MS) {
+      lastYieldAt = _now();
+      await new Promise(r => setTimeout(r, 0));
+      lastYieldAt = _now();
+      if (elapsed > SLOW_BUDGET_MS) longTaskCount++;
+    }
+    _scheduleHudUpdate();
+  }
+
+  // Cheaper poll for tight inner loops — returns true if a yield is due.
+  function due() { return (_now() - lastYieldAt) > FRAME_BUDGET_MS; }
+  function yieldNow() {
+    lastYieldAt = _now();
+    return new Promise(r => setTimeout(r, 0)).then(() => { lastYieldAt = _now(); });
+  }
+
+  function tickOp() {
+    opsThisWindow++;
+    const t = _now();
+    if (t - lastOpsTick > 1000) {
+      opsPerSec = opsThisWindow * 1000 / (t - lastOpsTick);
+      opsThisWindow = 0;
+      lastOpsTick = t;
+      _scheduleHudUpdate();
+    }
+  }
+
+  function pushStream(op, detail, notation) {
+    if (!op) return;
+    streamRing.push({
+      op,
+      detail: String(detail == null ? '' : detail).slice(0, 80),
+      notation: notation ? String(notation).slice(0, 48) : '',
+      t: _now(),
+    });
+    while (streamRing.length > STREAM_MAX) streamRing.shift();
+    _scheduleHudUpdate();
+  }
+
+  function queueIn(label) {
+    activeQueue++;
+    if (label) activeTaskLabel = label;
+    _scheduleHudUpdate();
+  }
+  function queueOut() {
+    activeQueue = Math.max(0, activeQueue - 1);
+    if (activeQueue === 0) activeTaskLabel = 'idle';
+    _scheduleHudUpdate();
+  }
+  function mark(label) {
+    if (label) activeTaskLabel = label;
+    _scheduleHudUpdate();
+  }
+
+  function togglePin() {
+    pinned = !pinned;
+    const hud = document.getElementById('perf-hud');
+    if (hud) hud.classList.toggle('perf-hud-pinned', pinned);
+    const btn = document.getElementById('perf-hud-pin');
+    if (btn) btn.textContent = pinned ? '⎗' : '⎘';
+    _scheduleHudUpdate();
+  }
+
+  // RAF-coalesced HUD render so rapid pushStream / yield calls don't
+  // themselves become the bottleneck. Renders at most once per frame.
+  let _hudRaf = 0;
+  function _scheduleHudUpdate() {
+    if (_hudRaf) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      _hudRaf = 1;
+      setTimeout(() => { _hudRaf = 0; _renderHud(); }, 16);
+      return;
+    }
+    _hudRaf = requestAnimationFrame(() => { _hudRaf = 0; _renderHud(); });
+  }
+
+  const _OP_COLORS = {
+    INS:'#4e8f62', SEG:'#60a5fa', SIG:'#fbbf24', CON:'#fb923c',
+    SYN:'#8a6a9a', DEF:'#22d3ee', EVA:'#a78bfa', NUL:'#f87171', REC:'#f472b6'
+  };
+
+  function _esc(s) {
+    return String(s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function _renderHud() {
+    const hud = document.getElementById('perf-hud');
+    if (!hud) return;
+    const visible = pinned || load > 0.05 || activeQueue > 0 || streamRing.length > 0;
+    hud.classList.toggle('perf-hud-active', visible);
+    if (!visible) return;
+
+    const pct = Math.max(0, Math.min(1, load)) * 100;
+    const fill = document.getElementById('perf-hud-fill');
+    if (fill) {
+      fill.style.width = pct.toFixed(1) + '%';
+      // green (120°) → red (0°) as load climbs; saturates at 100%.
+      const hue = Math.max(0, 120 - pct * 1.3);
+      fill.style.background = `hsl(${hue}, 72%, 48%)`;
+    }
+    const loadEl  = document.getElementById('perf-hud-load');
+    if (loadEl) loadEl.textContent = pct.toFixed(0) + '%';
+    const ltEl    = document.getElementById('perf-hud-lt');
+    if (ltEl) ltEl.textContent = longTaskCount + ' LT';
+    const opsEl   = document.getElementById('perf-hud-ops');
+    if (opsEl) opsEl.textContent = opsPerSec.toFixed(0) + ' op/s';
+    const qEl     = document.getElementById('perf-hud-queue');
+    if (qEl) qEl.textContent = activeTaskLabel;
+
+    const streamEl = document.getElementById('perf-hud-stream');
+    if (streamEl) {
+      // Newest on top — gives the "scrolling thoughts" effect the user
+      // asked for. Each row fades with age but never disappears so a
+      // human reader can pause (scroll) and catch up.
+      const rows = streamRing.slice().reverse();
+      if (rows.length === 0) {
+        streamEl.innerHTML = '<div class="perf-hud-empty">awaiting operators…</div>';
+      } else {
+        const nowT = _now();
+        streamEl.innerHTML = rows.map(r => {
+          const age = (nowT - r.t) / 1000;
+          const fade = Math.max(0.3, 1 - age / 8);
+          const notation = r.notation
+            ? `<span class="ph-notation">${_esc(r.notation)}</span>` : '';
+          return `<div class="ph-row" style="opacity:${fade.toFixed(2)}">`
+               + `<span class="ph-op ph-op-${_esc(r.op)}">${_esc(r.op)}</span>`
+               + `<span class="ph-detail">${_esc(r.detail)}</span>`
+               + notation
+               + `</div>`;
+        }).join('');
+      }
+    }
+  }
+
+  // Load decays when no work is happening so the meter doesn't stay
+  // pegged after a burst finishes.
+  setInterval(() => {
+    load *= 0.9;
+    if (load < 0.001) load = 0;
+    _scheduleHudUpdate();
+  }, 300);
+
+  // Format a compact EO-notation string for an operator-log entry.
+  // Used both by the ticker auto-subscriber and call sites that want
+  // to annotate a stream row with the cell key of a classification.
+  function formatNotation(entry) {
+    if (!entry || !entry.op) return '';
+    const op = entry.op;
+    const operand = entry.operand || {};
+    if (op === 'EVA') {
+      if (operand.notation) return operand.notation;
+      if (operand.operator && operand.site) {
+        return `${operand.operator}(${operand.resolution || '?'}, ${operand.site})`;
+      }
+      if (operand.eva_type) return `EVA[${operand.eva_type}]`;
+    }
+    if (op === 'INS' && entry.target === 'entity-registry') {
+      return `INS(${(entry.anchor||'').slice(0,10)})`;
+    }
+    if (op === 'DEF' && operand.param) {
+      const v = typeof operand.value === 'string'
+        ? operand.value.slice(0, 24) : operand.param;
+      return `DEF(${operand.param}=${v})`;
+    }
+    if (op === 'CON' && operand.relation_type) {
+      return `CON[${operand.relation_type}]`;
+    }
+    if (op === 'SIG' && operand.detector) {
+      return `SIG[${operand.detector}]`;
+    }
+    if (op === 'NUL' && operand.absence_type) {
+      return `NUL[${operand.absence_type}]`;
+    }
+    return '';
+  }
+
+  // Short, user-readable description of an entry for the stream row's
+  // main slot. Intentionally cheap — no DOM, no big allocations.
+  function describeEntry(entry) {
+    const op = entry.op;
+    const operand = entry.operand || {};
+    if (op === 'SEG') {
+      const t = operand.type || 'seg';
+      const text = (operand.text || '').slice(0, 32);
+      return text ? `${t}: ${text}` : t;
+    }
+    if (op === 'SIG') return (operand.text || operand.normalized || '').slice(0, 40);
+    if (op === 'INS') {
+      if (entry.target === 'entity-registry') {
+        return (entry.anchor || '').slice(0, 12);
+      }
+      return operand.type || entry.target || '';
+    }
+    if (op === 'DEF') return String(operand.value || operand.param || entry.target || '').slice(0, 40);
+    if (op === 'CON') {
+      if (operand.subject_text && operand.object_text) {
+        return `${String(operand.subject_text).slice(0,14)}↔${String(operand.object_text).slice(0,14)}`;
+      }
+      return operand.relation_type || '';
+    }
+    if (op === 'EVA') {
+      return operand.entity_text || operand.cell_id || operand.eva_type || '';
+    }
+    if (op === 'NUL') return operand.signal || operand.expected_entity || operand.absence_type || '';
+    if (op === 'REC') return operand.trigger || '';
+    if (op === 'SYN') return `${operand.component_size || 0}-node`;
+    return '';
+  }
+
+  // Public API.
+  return {
+    yieldIfNeeded, yieldNow, due, mark, pushStream, tickOp,
+    queueIn, queueOut, togglePin,
+    formatNotation, describeEntry,
+    get load()          { return load; },
+    get longTaskCount() { return longTaskCount; },
+    get opsPerSec()     { return opsPerSec; },
+    get isPinned()      { return pinned; },
+  };
+})();
+if (typeof window !== 'undefined') window.perfMonitor = perfMonitor;
+
 // ═══════════════════════════════════════════════════════
 // ANCHOR  — synchronous FNV-1a hash → 12 hex chars
 // ═══════════════════════════════════════════════════════
@@ -2293,13 +2742,36 @@ function segmentClauses(sent, sentStart, script) {
 // ── Log class ─────────────────────────────────────────
 
 class OperatorLog {
-  constructor() { this._e = []; this._sub = null; }
+  constructor() { this._e = []; this._sub = null; this._silent = false; }
   push(e) {
     this._e.push(e);
     // Live-subscription hook: lets the UI stream operator events into the
     // log panel as they are produced by the ingest pipeline. Errors in the
     // subscriber must never corrupt log state.
     if (this._sub) { try { this._sub(e); } catch {} }
+    // Mirror into the perfMonitor stream so the user sees the pipeline
+    // thinking in EO notation. Ring-buffered + RAF-coalesced on the
+    // HUD side, so high-frequency SEG/SIG pushes can't jam the thread.
+    // `_silent` lets rebuild/replay paths bulk-append without spamming
+    // the HUD (and without double-counting op throughput).
+    if (!this._silent && typeof perfMonitor !== 'undefined' && e && e.op) {
+      try {
+        perfMonitor.tickOp();
+        perfMonitor.pushStream(
+          e.op,
+          perfMonitor.describeEntry(e),
+          perfMonitor.formatNotation(e)
+        );
+      } catch {}
+    }
+    return e;
+  }
+  // Append many entries without firing subscribers or HUD streaming.
+  // Used by state.combined rebuilds that mirror existing logs.
+  pushSilent(e) {
+    const prev = this._silent;
+    this._silent = true;
+    try { this.push(e); } finally { this._silent = prev; }
     return e;
   }
   entries() { return [...this._e]; }
@@ -4124,13 +4596,27 @@ async function ingest(text, title, source, log) {
   // Register as the active ingest log so worker fold_event messages can
   // mirror INS/DEF entries back into the in-flight log.
   window.__activeIngestLog = log;
-  // Yield to the event loop between stages so the UI can repaint and show
-  // operator events as they stream in. Without this, the pipeline runs to
-  // completion in one JS turn and the user sees nothing until the end.
-  const yieldTick = () => new Promise(r => setTimeout(r, 0));
+  // Bracket the ingest with the perfMonitor HUD so the workload meter
+  // and operator-notation stream auto-surface while ingest is running.
+  perfMonitor.queueIn('ingest');
+  try {
+    return await _ingestInner(text, title, source, log);
+  } finally {
+    window.__activeIngestLog = null;
+    perfMonitor.queueOut();
+  }
+}
+
+async function _ingestInner(text, title, source, log) {
+  // Adaptive yield: yields only when the frame budget is exceeded, so
+  // short stages don't pay a setTimeout round-trip while long ones
+  // reliably give the UI a chance to paint. Replaces the old
+  // `() => new Promise(r => setTimeout(r, 0))` unconditional yield.
+  const yieldTick = (label) => perfMonitor.yieldIfNeeded(label);
   const setStage = (label) => {
     const el = document.getElementById('parsing-label');
     if (el) el.textContent = label;
+    perfMonitor.mark(label);
   };
 
   text = cleanText(text);
@@ -4342,7 +4828,6 @@ async function ingest(text, title, source, log) {
       }
     } catch {}
   }
-  window.__activeIngestLog = null;
   return { log, doc_anchor: da };
 }
 
@@ -5833,9 +6318,11 @@ function runIngest() {
         // Rebuild combined log incrementally so renderLog() sees the
         // in-flight entries from every doc. Cheap while logs are small;
         // for large corpora the throttle keeps this to ~60fps.
+        // pushSilent keeps this O(N) rebuild from spamming the HUD
+        // stream with every already-streamed entry on every RAF tick.
         const combined = new OperatorLog();
         for (const d of state.docs) {
-          for (const e of d.log.entries()) combined.push(e);
+          for (const e of d.log.entries()) combined.pushSilent(e);
         }
         state.combined = combined;
         renderLog();
@@ -5874,10 +6361,11 @@ function runIngest() {
       try { await workerRequest(workerBridge.logWorker, 'flush_index', {}); } catch {}
     }
 
-    // Rebuild combined log
+    // Rebuild combined log. Silent so we don't spam the HUD with
+    // replays of entries the user already watched scroll past.
     state.combined = new OperatorLog();
     for (const doc of state.docs) {
-      for (const e of doc.log.entries()) state.combined.push(e);
+      for (const e of doc.log.entries()) state.combined.pushSilent(e);
     }
     // Structural EVA — cross-doc frame testing (always runs; guards internally)
     stageEVA_structural(state.combined, state.docs.map(d => d.log));
@@ -6243,16 +6731,75 @@ if (typeof window !== 'undefined') {
   });
 }
 
+// Chunked log renderer. Large corpora used to land the entire log as one
+// innerHTML string (multi-MB on any non-trivial document), which froze the
+// main thread for hundreds of ms. We now render the first window
+// synchronously for instant feedback and stream the remainder in
+// requestIdleCallback-driven chunks. A monotonically-incrementing token
+// cancels any in-flight chunked render when renderLog re-enters.
+const _LOG_FIRST_CHUNK = 60;
+const _LOG_CHUNK_SIZE  = 80;
+let _logRenderToken = 0;
 function renderLog() {
   const list = document.getElementById('log-list');
-  if (!state.combined) { list.innerHTML = '<div class="log-empty"><div class="empty-glyph">∅</div><div>No entries</div></div>'; return; }
+  if (!list) return;
+  if (!state.combined) {
+    list.innerHTML = '<div class="log-empty"><div class="empty-glyph">∅</div><div>No entries</div></div>';
+    return;
+  }
 
   const entries = state.combined.entries();
-  if (entries.length === 0) { list.innerHTML = '<div class="log-empty"><div class="empty-glyph">∅</div><div>No entries</div></div>'; return; }
+  if (entries.length === 0) {
+    list.innerHTML = '<div class="log-empty"><div class="empty-glyph">∅</div><div>No entries</div></div>';
+    return;
+  }
 
-  list.innerHTML = entries.map((e, idx) => renderEntry(e, idx)).join('');
-  document.getElementById('log-count').textContent = `(${entries.length})`;
+  const token = ++_logRenderToken;
+  const total = entries.length;
+  const countEl = document.getElementById('log-count');
+  if (countEl) countEl.textContent = `(${total})`;
+
+  // Synchronous first window — the user sees something immediately.
+  const firstEnd = Math.min(total, _LOG_FIRST_CHUNK);
+  let html = '';
+  for (let i = 0; i < firstEnd; i++) html += renderEntry(entries[i], i);
+  if (firstEnd < total) {
+    html += `<div class="log-empty" id="log-render-pending" style="opacity:0.6;font-size:11px;">`
+         +  `rendering ${total - firstEnd} more entries…</div>`;
+  }
+  list.innerHTML = html;
   applyFilter(state.activeFilter);
+
+  if (firstEnd >= total) return;
+
+  // Chunk the rest so rendering never owns the thread for long. Uses
+  // requestIdleCallback when available; falls back to setTimeout(0).
+  const schedule = typeof requestIdleCallback === 'function'
+    ? (fn) => requestIdleCallback(fn, { timeout: 120 })
+    : (fn) => setTimeout(fn, 0);
+
+  perfMonitor.queueIn('renderLog');
+  const renderChunk = (start) => {
+    if (token !== _logRenderToken) { perfMonitor.queueOut(); return; }
+    const end = Math.min(total, start + _LOG_CHUNK_SIZE);
+    let chunk = '';
+    for (let i = start; i < end; i++) chunk += renderEntry(entries[i], i);
+    const pending = document.getElementById('log-render-pending');
+    if (pending) {
+      pending.insertAdjacentHTML('beforebegin', chunk);
+      if (end >= total) pending.remove();
+      else pending.textContent = `rendering ${total - end} more entries…`;
+    }
+    // Re-apply the current filter so freshly-streamed entries respect
+    // any active filter the user selected during chunked rendering.
+    applyFilter(state.activeFilter);
+    if (end < total) {
+      schedule(() => renderChunk(end));
+    } else {
+      perfMonitor.queueOut();
+    }
+  };
+  schedule(() => renderChunk(firstEnd));
 }
 
 function renderEntry(e, idx) {
