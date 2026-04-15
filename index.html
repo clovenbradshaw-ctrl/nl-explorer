@@ -6695,29 +6695,51 @@ function runIngest() {
   renderTabs();
   renderDocViewer();
 
-  // Throttled live-render: each operator push schedules a renderLog pass
-  // on the next animation frame. Coalesces bursts during heavy stages.
-  let rafScheduled = false;
-  liveLog.subscribe(() => {
-    if (rafScheduled) return;
-    rafScheduled = true;
-    requestAnimationFrame(() => {
-      rafScheduled = false;
+  // Throttled live-render: coalesce operator-push bursts. The previous
+  // implementation fired on every RAF and rebuilt `state.combined` from
+  // scratch each tick — O(N) per frame produced O(N²) work over a long
+  // ingest, which froze / crashed the tab on larger documents. We now:
+  //   1. Rebuild at most once per REBUILD_MIN_MS (wall-clock).
+  //   2. Cap the combined log's size so a runaway ingest can't balloon.
+  //   3. Skip renderLog work when the Explorer view is focused.
+  const REBUILD_MIN_MS  = 180;   // ≥180ms between rebuilds — plenty snappy
+  const COMBINED_CAP    = 8000;  // ring cap for state.combined
+  let   lastRebuildAt   = 0;
+  let   rebuildPending  = false;
+  const scheduleRebuild = () => {
+    if (rebuildPending) return;
+    rebuildPending = true;
+    const now = (performance && performance.now) ? performance.now() : Date.now();
+    const wait = Math.max(0, REBUILD_MIN_MS - (now - lastRebuildAt));
+    setTimeout(() => {
+      rebuildPending = false;
+      lastRebuildAt = (performance && performance.now) ? performance.now() : Date.now();
       try {
-        // Rebuild combined log incrementally so renderLog() sees the
-        // in-flight entries from every doc. Cheap while logs are small;
-        // for large corpora the throttle keeps this to ~60fps.
-        // pushSilent keeps this O(N) rebuild from spamming the HUD
-        // stream with every already-streamed entry on every RAF tick.
         const combined = new OperatorLog();
-        for (const d of state.docs) {
-          for (const e of d.log.entries()) combined.pushSilent(e);
+        // Collect per-doc tails so a runaway doc can't starve the others.
+        // Cap total entries at COMBINED_CAP — the log panel is a stream
+        // view, not a complete audit log.
+        const docs = state.docs || [];
+        let budget = COMBINED_CAP;
+        for (let i = docs.length - 1; i >= 0 && budget > 0; i--) {
+          const es = docs[i].log.entries();
+          const take = Math.min(budget, es.length);
+          // push most recent `take` in original order
+          for (let j = es.length - take; j < es.length; j++) combined.pushSilent(es[j]);
+          budget -= take;
         }
         state.combined = combined;
-        renderLog();
+        // Don't do the expensive renderLog pass while the Explorer is
+        // on-screen — it owns its own render pipeline.
+        const explorerVisible = (() => {
+          const el = document.getElementById('explorer-shell');
+          return el && el.style.display !== 'none';
+        })();
+        if (!explorerVisible) renderLog();
       } catch {}
-    });
-  });
+    }, wait);
+  };
+  liveLog.subscribe(scheduleRebuild);
 
   ingest(text, title, title, liveLog).then(async ({ log, doc_anchor }) => {
     // ingest() populated liveLog in place; doc_anchor may differ from the
@@ -9585,8 +9607,8 @@ function escapeHtml(str) {
         </div>
       </div>
       <div class="span-ctx">
-        <div class="ctx-hdr"><span class="plbl">Provenance Trail</span><span id="ctx-range" class="mono-sm">— select a span —</span></div>
-        <div class="ctx-body" id="ctx-body"><div style="color:var(--td);font-family:'Spectral',serif;font-style:italic;font-size:12px;">Click any highlighted span to trace its provenance chain</div></div>
+        <div class="ctx-hdr"><span class="plbl">Content</span><span id="ctx-range" class="mono-sm">— select a span —</span></div>
+        <div class="ctx-body" id="ctx-body"><div style="color:var(--td);font-family:'Spectral',serif;font-style:italic;font-size:12px;">Click any highlighted text to read the surrounding sentence in plain view.</div></div>
       </div>
     </div>
 
@@ -9936,25 +9958,62 @@ function rDocText(){
   }).join('');
 }
 function rCtxStrip(spanId){
-  if(!spanId){document.getElementById('ctx-range').textContent='— select a span —';document.getElementById('ctx-body').innerHTML=`<div style="color:var(--td);font-family:'Spectral',serif;font-style:italic;font-size:12px;">Click any highlighted span to trace its provenance chain</div>`;return;}
-  const sp=SPANS.find(s=>s.id===spanId);if(!sp)return;
-  const res=resolveSpans(sp.src).find(r=>r.id===spanId);if(!res)return;
-  const en=entOf(sp.eid),doc=DOCS[sp.src],o=opOf(sp.op);
-  const ft=DOCS[sp.src].text;
-  const cs=Math.max(0,res.start-20),ce=Math.min(ft.length,res.end+20);
-  const pre=ft.slice(cs,res.start),match=ft.slice(res.start,res.end),post=ft.slice(res.end,ce);
-  document.getElementById('ctx-range').textContent=`chars [${res.start}:${res.end}] · ${match.length}c`;
-  document.getElementById('ctx-body').innerHTML=`<div class="ptrail">
-    <div class="pt-node"><div class="pt-lbl">Document</div><div class="pt-val">${doc.title}</div><div class="pt-val mono">${doc.type} · ${doc.date}</div></div>
-    <div class="pt-arrow">→</div>
-    <div class="pt-node anode"><div class="pt-lbl">Span [${res.start}:${res.end}]</div>
-      <div class="pt-val serif" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">"…${esc(pre.slice(-12))}<span style="background:rgba(${rgb(o.col)},.22);color:${o.col};border-radius:2px;padding:0 1px;">${esc(match.slice(0,30)+(match.length>30?'…':''))}</span>${esc(post.slice(0,12))}…"</div>
-      <div class="pt-val mono">${o.sym}</div></div>
-    <div class="pt-arrow">→</div>
-    <div class="pt-node"><div class="pt-lbl">Entity</div><div class="pt-val">${en?en.name:sp.eid}</div><div class="pt-val mono">${en?en.type:''}</div></div>
-    <div class="pt-arrow">→</div>
-    <div class="pt-node"><div class="pt-lbl">EO Event</div><div class="pt-val mono">${o.sym}</div><div class="pt-val serif">${sp.note.slice(0,50)}${sp.note.length>50?'…':''}</div></div>
-  </div>`;
+  const hdr = document.getElementById('ctx-range');
+  const body = document.getElementById('ctx-body');
+  if(!spanId){
+    hdr.textContent='— select a span —';
+    body.innerHTML = `<div style="color:var(--td);font-family:'Spectral',serif;font-style:italic;font-size:12px;">Click any highlighted text to see the surrounding sentence in plain view.</div>`;
+    return;
+  }
+  const sp = SPANS.find(s=>s.id===spanId); if(!sp) return;
+  const res = resolveSpans(sp.src).find(r=>r.id===spanId); if(!res) return;
+  const en = entOf(sp.eid), doc = DOCS[sp.src], o = opOf(sp.op);
+  const ft = DOCS[sp.src].text;
+
+  // Plain-text content view: extract the sentence(s) containing the
+  // clicked span so readers see the actual content, not a provenance
+  // chain. Sentence boundaries are approximated by ., !, ?, newline.
+  const SENTENCE_BREAK = /[.!?\n]\s+/g;
+  const findSentenceStart = (pos) => {
+    let s = 0;
+    SENTENCE_BREAK.lastIndex = 0;
+    let m;
+    while ((m = SENTENCE_BREAK.exec(ft)) !== null) {
+      if (m.index + m[0].length > pos) break;
+      s = m.index + m[0].length;
+    }
+    return s;
+  };
+  const findSentenceEnd = (pos) => {
+    SENTENCE_BREAK.lastIndex = pos;
+    const m = SENTENCE_BREAK.exec(ft);
+    return m ? m.index + 1 : ft.length;
+  };
+  // Include one sentence of padding on each side for readable flow.
+  const s0 = findSentenceStart(res.start);
+  const e0 = findSentenceEnd(res.end);
+  // Bound total excerpt so a huge run-on doesn't dump a megabyte into DOM.
+  const MAX = 600;
+  let exStart = s0, exEnd = e0;
+  if (exEnd - exStart > MAX) {
+    exStart = Math.max(s0, res.start - Math.floor(MAX/2));
+    exEnd   = Math.min(e0, res.end + Math.floor(MAX/2));
+  }
+  const pre   = ft.slice(exStart, res.start);
+  const match = ft.slice(res.start, res.end);
+  const post  = ft.slice(res.end, exEnd);
+  const leadEllipsis  = exStart > 0 ? '… ' : '';
+  const trailEllipsis = exEnd < ft.length ? ' …' : '';
+
+  hdr.textContent = `${doc.title} · chars [${res.start}:${res.end}]`;
+  body.innerHTML = `
+    <div class="plain-text-view" style="font-family:'Spectral',Georgia,serif;font-size:14px;line-height:1.55;color:var(--ink);padding:2px 2px 6px 2px;">
+      ${leadEllipsis}${esc(pre)}<mark style="background:rgba(${rgb(o.col)},.22);color:${o.col};padding:0 2px;border-radius:2px;">${esc(match)}</mark>${esc(post)}${trailEllipsis}
+    </div>
+    <div style="margin-top:8px;display:flex;gap:10px;flex-wrap:wrap;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--td);">
+      <span><strong style="color:var(--ink);">what:</strong> ${en?esc(en.name):esc(sp.eid)}</span>
+      <span><strong style="color:var(--ink);">why flagged:</strong> ${esc((sp.note||'').slice(0,100))}</span>
+    </div>`;
 }
 function bindSpanClicks(){
   document.querySelectorAll('.dspan').forEach(el=>{
@@ -10409,9 +10468,17 @@ function sSpan(spanId){
   actSpan=spanId;actEnt=sp.eid;
   document.getElementById('hdr-sel').textContent=entOf(sp.eid)?.name||spanId;
   if(sp.src!==actDoc){actDoc=sp.src;rDocSelector();}
-  rDocText();rCtxStrip(spanId);rProv(sp.eid);rGraph();
-  if(actTab==='lib')rLib();
-  if(actTab==='inspect'){rInspector(sp.eid);}
+  // Primary click response: refresh the doc highlight + the plain-text
+  // content view. Everything else (graph, provenance chain, entity
+  // inspector) is deferred to the tab that actually owns that view, so
+  // a single click on a large corpus doesn't re-render the full graph.
+  rDocText();
+  rCtxStrip(spanId);
+  if(actTab==='inspect') rInspector(sp.eid);
+  if(actTab==='lib')     rLib();
+  // Graph + provenance only refresh when those panels are visible on the
+  // right rail; no visual change either way on Docs tab.
+  try { rProv(sp.eid); } catch {}
   setTimeout(()=>{
     const el=document.querySelector(`.dspan[data-sp="${spanId}"]`);
     if(el)el.scrollIntoView({block:'center',behavior:'smooth'});
@@ -10617,7 +10684,38 @@ function showView(which){
 // ── Bridge: translate the ingest engine's state.docs + state.combined
 //    into the explorer's DOCS / ENT / SPANS / GNODES / GEDGES model,
 //    then re-render the explorer panels.
+//
+// Throttled + capped: for large corpora the raw entry stream can run
+// into the tens of thousands. Previous versions iterated it 5+ times
+// unconditionally and allocated fresh per-pass arrays, which froze the
+// tab on anything nontrivial. We now debounce back-to-back calls and
+// cap the work done per sync so the UI stays responsive.
+const EXPLORER_MAX_ENTRIES = 8000;
+const EXPLORER_MAX_SPANS   = 3000;
+const EXPLORER_MAX_ENTS    = 400;
+const EXPLORER_MIN_GAP_MS  = 250;
+let _explorerSyncPending   = false;
+let _explorerSyncLastAt    = 0;
 function syncExplorerFromIngest(){
+  // Coalesce bursts — callers include live-log subscribers that can
+  // fire dozens of times per second during ingest.
+  const _now = () => (performance && performance.now) ? performance.now() : Date.now();
+  const gap = _now() - _explorerSyncLastAt;
+  if (_explorerSyncPending) return;
+  if (gap < EXPLORER_MIN_GAP_MS) {
+    _explorerSyncPending = true;
+    setTimeout(() => {
+      _explorerSyncPending = false;
+      try { _syncExplorerFromIngestImpl(); } catch (err) { console.error('explorer sync failed', err); }
+      _explorerSyncLastAt = _now();
+    }, EXPLORER_MIN_GAP_MS - gap);
+    return;
+  }
+  try { _syncExplorerFromIngestImpl(); } catch (err) { console.error('explorer sync failed', err); }
+  _explorerSyncLastAt = _now();
+}
+
+function _syncExplorerFromIngestImpl(){
   if(typeof state === 'undefined' || !state.docs || state.docs.length === 0){
     // Clear explorer to empty state
     DOCS = {}; ENT.length = 0; SPANS.length = 0;
@@ -10648,7 +10746,13 @@ function syncExplorerFromIngest(){
   });
   DOCS = newDocs;
 
-  const entries = state.combined ? state.combined.entries() : [];
+  // Cap entries — for large corpora the full stream is tens of thousands
+  // of events, and we iterate it 5+ times below. Keep the most recent
+  // EXPLORER_MAX_ENTRIES; older stuff is still visible in the ingest log.
+  let entries = state.combined ? state.combined.entries() : [];
+  if (entries.length > EXPLORER_MAX_ENTRIES) {
+    entries = entries.slice(-EXPLORER_MAX_ENTRIES);
+  }
 
   // ── Entities ────────────────────────────────────────────────
   // In the real ingest log, entities are created by INS entries of the form
@@ -10721,6 +10825,7 @@ function syncExplorerFromIngest(){
   const newSpans = [];
   let spanSeq = 0;
   for (const e of entries) {
+    if (newSpans.length >= EXPLORER_MAX_SPANS) break;
     const prov = e.provenance || {};
     const src = docByAnchor[prov.doc_anchor];
     if (!src) continue;
@@ -10782,7 +10887,17 @@ function syncExplorerFromIngest(){
   }
 
   ENT.length = 0;
-  entMap.forEach(r => ENT.push(r));
+  // Cap entities — a runaway NP detector can produce thousands of
+  // single-mention entities that bury the useful ones and blow up
+  // downstream O(entities × spans) renders. Keep the most-referenced.
+  const _entSorted = [...entMap.values()];
+  if (_entSorted.length > EXPLORER_MAX_ENTS) {
+    const mentionCount = new Map();
+    for (const sp of newSpans) mentionCount.set(sp.eid, (mentionCount.get(sp.eid) || 0) + 1);
+    _entSorted.sort((a,b) => (mentionCount.get(b.id)||0) - (mentionCount.get(a.id)||0));
+    _entSorted.length = EXPLORER_MAX_ENTS;
+  }
+  _entSorted.forEach(r => ENT.push(r));
 
   // ── Graph: entities → nodes (radial layout), CON → edges ──
   GNODES.length = 0; GEDGES.length = 0;
