@@ -6695,28 +6695,42 @@ function runIngest() {
   renderTabs();
   renderDocViewer();
 
-  // Throttled live-render: each operator push schedules a renderLog pass
-  // on the next animation frame. Coalesces bursts during heavy stages.
-  let rafScheduled = false;
+  // Debounced live-render. Previously this rebuilt state.combined on every
+  // animation frame — that's O(N) per frame → O(N²) over a long ingest and
+  // was pegging a CPU core, causing the tab to be killed. Now:
+  //   • debounce to ≥180ms between rebuilds, and
+  //   • cap the rebuild at LIVE_COMBINED_CAP entries (keep tail; ingest
+  //     stages run against the full per-doc logs separately).
+  //   • skip renderLog entirely while the Explorer shell is the active view,
+  //     since the log list isn't visible there.
+  const LIVE_COMBINED_CAP = 8000;
+  const LIVE_DEBOUNCE_MS  = 180;
+  let _liveTimer = 0;
+  let _liveLastRun = 0;
+  const runLiveRebuild = () => {
+    _liveTimer = 0;
+    _liveLastRun = Date.now();
+    try {
+      const combined = new OperatorLog();
+      // Collect entries newest-last but cap total size. We walk docs in
+      // order and keep only the last LIVE_COMBINED_CAP across the board.
+      const buf = [];
+      for (const d of state.docs) {
+        const ents = d.log.entries();
+        for (let i = 0; i < ents.length; i++) buf.push(ents[i]);
+      }
+      const start = buf.length > LIVE_COMBINED_CAP ? buf.length - LIVE_COMBINED_CAP : 0;
+      for (let i = start; i < buf.length; i++) combined.pushSilent(buf[i]);
+      state.combined = combined;
+      const explorerActive = document.getElementById('view-explorer')?.classList.contains('active');
+      if (!explorerActive) renderLog();
+    } catch {}
+  };
   liveLog.subscribe(() => {
-    if (rafScheduled) return;
-    rafScheduled = true;
-    requestAnimationFrame(() => {
-      rafScheduled = false;
-      try {
-        // Rebuild combined log incrementally so renderLog() sees the
-        // in-flight entries from every doc. Cheap while logs are small;
-        // for large corpora the throttle keeps this to ~60fps.
-        // pushSilent keeps this O(N) rebuild from spamming the HUD
-        // stream with every already-streamed entry on every RAF tick.
-        const combined = new OperatorLog();
-        for (const d of state.docs) {
-          for (const e of d.log.entries()) combined.pushSilent(e);
-        }
-        state.combined = combined;
-        renderLog();
-      } catch {}
-    });
+    if (_liveTimer) return;
+    const elapsed = Date.now() - _liveLastRun;
+    const wait = Math.max(0, LIVE_DEBOUNCE_MS - elapsed);
+    _liveTimer = setTimeout(runLiveRebuild, wait);
   });
 
   ingest(text, title, title, liveLog).then(async ({ log, doc_anchor }) => {
@@ -9585,8 +9599,8 @@ function escapeHtml(str) {
         </div>
       </div>
       <div class="span-ctx">
-        <div class="ctx-hdr"><span class="plbl">Provenance Trail</span><span id="ctx-range" class="mono-sm">— select a span —</span></div>
-        <div class="ctx-body" id="ctx-body"><div style="color:var(--td);font-family:'Spectral',serif;font-style:italic;font-size:12px;">Click any highlighted span to trace its provenance chain</div></div>
+        <div class="ctx-hdr"><span class="plbl">In context</span><span id="ctx-range" class="mono-sm">— select a span —</span></div>
+        <div class="ctx-body" id="ctx-body"><div style="color:var(--td);font-family:'Spectral',serif;font-style:italic;font-size:12px;">Click any highlighted text to read the surrounding sentence in plain view.</div></div>
       </div>
     </div>
 
@@ -9935,26 +9949,73 @@ function rDocText(){
     </div>`;
   }).join('');
 }
+// Find the sentence containing [start,end] within text. Sentence boundaries
+// are the usual ., !, ?, or newline (plus document boundaries). Keeps the
+// result readable — if the nearest boundaries produce a < 40 char window,
+// expand outward until at least one boundary on each side is crossed.
+function _sentenceAround(text, start, end){
+  if (!text || typeof text !== 'string') return { s:start, e:end };
+  const SENT = /[.!?\n]/;
+  let s = start;
+  while (s > 0) {
+    const c = text[s - 1];
+    if (SENT.test(c) && text[s] === ' ') break;
+    if (c === '\n') break;
+    s--;
+  }
+  while (s < start && /\s/.test(text[s])) s++;
+  let e = end;
+  while (e < text.length) {
+    const c = text[e];
+    if (SENT.test(c)) { e++; break; }
+    e++;
+  }
+  // Keep sentences reasonably sized.
+  if (e - s > 600) {
+    s = Math.max(0, start - 200);
+    e = Math.min(text.length, end + 200);
+  }
+  return { s, e };
+}
+
 function rCtxStrip(spanId){
-  if(!spanId){document.getElementById('ctx-range').textContent='— select a span —';document.getElementById('ctx-body').innerHTML=`<div style="color:var(--td);font-family:'Spectral',serif;font-style:italic;font-size:12px;">Click any highlighted span to trace its provenance chain</div>`;return;}
-  const sp=SPANS.find(s=>s.id===spanId);if(!sp)return;
-  const res=resolveSpans(sp.src).find(r=>r.id===spanId);if(!res)return;
-  const en=entOf(sp.eid),doc=DOCS[sp.src],o=opOf(sp.op);
-  const ft=DOCS[sp.src].text;
-  const cs=Math.max(0,res.start-20),ce=Math.min(ft.length,res.end+20);
-  const pre=ft.slice(cs,res.start),match=ft.slice(res.start,res.end),post=ft.slice(res.end,ce);
-  document.getElementById('ctx-range').textContent=`chars [${res.start}:${res.end}] · ${match.length}c`;
-  document.getElementById('ctx-body').innerHTML=`<div class="ptrail">
-    <div class="pt-node"><div class="pt-lbl">Document</div><div class="pt-val">${doc.title}</div><div class="pt-val mono">${doc.type} · ${doc.date}</div></div>
-    <div class="pt-arrow">→</div>
-    <div class="pt-node anode"><div class="pt-lbl">Span [${res.start}:${res.end}]</div>
-      <div class="pt-val serif" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">"…${esc(pre.slice(-12))}<span style="background:rgba(${rgb(o.col)},.22);color:${o.col};border-radius:2px;padding:0 1px;">${esc(match.slice(0,30)+(match.length>30?'…':''))}</span>${esc(post.slice(0,12))}…"</div>
-      <div class="pt-val mono">${o.sym}</div></div>
-    <div class="pt-arrow">→</div>
-    <div class="pt-node"><div class="pt-lbl">Entity</div><div class="pt-val">${en?en.name:sp.eid}</div><div class="pt-val mono">${en?en.type:''}</div></div>
-    <div class="pt-arrow">→</div>
-    <div class="pt-node"><div class="pt-lbl">EO Event</div><div class="pt-val mono">${o.sym}</div><div class="pt-val serif">${sp.note.slice(0,50)}${sp.note.length>50?'…':''}</div></div>
-  </div>`;
+  const rangeEl = document.getElementById('ctx-range');
+  const bodyEl  = document.getElementById('ctx-body');
+  if(!spanId){
+    rangeEl.textContent = '— select a span —';
+    bodyEl.innerHTML = `<div style="color:var(--td);font-family:'Spectral',serif;font-style:italic;font-size:12px;">Click any highlighted text to read the surrounding sentence in plain view.</div>`;
+    return;
+  }
+  const sp = SPANS.find(s => s.id === spanId); if(!sp) return;
+  const res = resolveSpans(sp.src).find(r => r.id === spanId); if(!res) return;
+  const en  = entOf(sp.eid);
+  const doc = DOCS[sp.src];
+  const o   = opOf(sp.op);
+  const ft  = doc.text;
+  const { s: sentStart, e: sentEnd } = _sentenceAround(ft, res.start, res.end);
+  const pre   = ft.slice(sentStart, res.start);
+  const match = ft.slice(res.start, res.end);
+  const post  = ft.slice(res.end,   sentEnd);
+
+  rangeEl.textContent = `${doc.title} · [${res.start}:${res.end}]`;
+
+  // Plain-text readable body: sentence with the clicked phrase highlighted.
+  // Provenance chain is demoted to a terse "what / why flagged" footer.
+  const opLabel = o && o.name ? o.name : (sp.op || '').toUpperCase();
+  const why = sp.note && sp.note.trim() ? sp.note.trim() : opLabel;
+  const whoName = en ? en.name : '';
+  const whoLine = whoName
+    ? `<span class="ctx-footer-label">About</span> ${esc(whoName)} · `
+    : '';
+
+  bodyEl.innerHTML = `
+    <div class="ctx-sentence" style="font-family:'Spectral',Georgia,serif;font-size:15px;line-height:1.55;color:var(--fg);padding:6px 4px 10px 4px;">
+      <span style="opacity:0.85;">${esc(pre)}</span><mark style="background:rgba(${rgb(o.col)},.28);color:var(--fg);padding:0 2px;border-radius:2px;">${esc(match)}</mark><span style="opacity:0.85;">${esc(post)}</span>
+    </div>
+    <div class="ctx-footer" style="font-family:'Inter',sans-serif;font-size:11px;color:var(--td);padding:4px 4px 0 4px;border-top:1px solid var(--div);display:flex;gap:8px;flex-wrap:wrap;">
+      <span><span class="ctx-footer-label" style="color:${o.col};font-weight:600;">${esc(opLabel)}</span> — ${esc(why.slice(0,180))}${why.length>180?'…':''}</span>
+      <span style="margin-left:auto;">${whoLine}${esc(doc.title)}</span>
+    </div>`;
 }
 function bindSpanClicks(){
   document.querySelectorAll('.dspan').forEach(el=>{
@@ -10409,9 +10470,16 @@ function sSpan(spanId){
   actSpan=spanId;actEnt=sp.eid;
   document.getElementById('hdr-sel').textContent=entOf(sp.eid)?.name||spanId;
   if(sp.src!==actDoc){actDoc=sp.src;rDocSelector();}
-  rDocText();rCtxStrip(spanId);rProv(sp.eid);rGraph();
-  if(actTab==='lib')rLib();
-  if(actTab==='inspect'){rInspector(sp.eid);}
+  // Doc text + plain-sentence context always refresh — they're the primary
+  // surface. Inspector / gloss / graph were being force-rendered on every
+  // click, each one doing full O(N) sweeps, which made repeated clicks
+  // feel like they were locking the tab. Only refresh them when their
+  // tab is actually visible; rGraph doesn't change shape on a same-entity
+  // span click anyway, so it's dropped here entirely.
+  rDocText();
+  rCtxStrip(spanId);
+  if(actTab==='inspect'){ rProv(sp.eid); rInspector(sp.eid); }
+  if(actTab==='lib')    { rLib(); }
   setTimeout(()=>{
     const el=document.querySelector(`.dspan[data-sp="${spanId}"]`);
     if(el)el.scrollIntoView({block:'center',behavior:'smooth'});
@@ -10604,7 +10672,11 @@ function showView(which){
     // ingested something. Before that, leave the Nashville sample visible
     // so the explorer isn't an empty void on first visit.
     if (typeof state !== 'undefined' && state.docs && state.docs.length > 0) {
-      try { syncExplorerFromIngest(); } catch(err) { console.error('sync failed', err); }
+      // Flip-to-explorer is a direct user action — render immediately and
+      // cancel any pending debounced sync so we don't re-run right after.
+      if (_syncTimer) { clearTimeout(_syncTimer); _syncTimer = 0; }
+      try { _syncExplorerFromIngestNow(); _syncLastRun = Date.now(); }
+      catch(err) { console.error('sync failed', err); }
     }
   } else {
     shell.style.display='grid';
@@ -10617,7 +10689,21 @@ function showView(which){
 // ── Bridge: translate the ingest engine's state.docs + state.combined
 //    into the explorer's DOCS / ENT / SPANS / GNODES / GEDGES model,
 //    then re-render the explorer panels.
-function syncExplorerFromIngest(){
+//
+// Throttling: this function iterates state.combined.entries() 5+ times and
+// rebuilds every explorer panel. Ingest can call it dozens of times/sec,
+// which repeatedly pegged the main thread and crashed the tab. Wrap the
+// exported name in a debounced (≥250ms) entry point, with hard caps on
+// entries / spans / entities processed, so a runaway corpus can't wedge
+// the UI. Keep the raw implementation under _syncExplorerFromIngestNow
+// for the initial on-view-switch call which wants a fresh render.
+const EXPLORER_SYNC_DEBOUNCE_MS = 250;
+const EXPLORER_ENTRY_CAP        = 8000;
+const EXPLORER_SPAN_CAP         = 3000;
+const EXPLORER_ENTITY_CAP       = 400;
+let _syncTimer = 0;
+let _syncLastRun = 0;
+function _syncExplorerFromIngestNow(){
   if(typeof state === 'undefined' || !state.docs || state.docs.length === 0){
     // Clear explorer to empty state
     DOCS = {}; ENT.length = 0; SPANS.length = 0;
@@ -10648,7 +10734,14 @@ function syncExplorerFromIngest(){
   });
   DOCS = newDocs;
 
-  const entries = state.combined ? state.combined.entries() : [];
+  // Cap entries processed — walking a 100k-entry combined log 5+ times was
+  // the main ingest crash path. Keep the tail (most recent), since
+  // entity-creation INS entries land early but are idempotent if missed:
+  // downstream ACCUMULATION SIGs will promote them via the fallback below.
+  let entries = state.combined ? state.combined.entries() : [];
+  if (entries.length > EXPLORER_ENTRY_CAP) {
+    entries = entries.slice(entries.length - EXPLORER_ENTRY_CAP);
+  }
 
   // ── Entities ────────────────────────────────────────────────
   // In the real ingest log, entities are created by INS entries of the form
@@ -10770,8 +10863,14 @@ function syncExplorerFromIngest(){
     });
   }
 
+  // Cap spans so the rail, annotateText, and click handlers don't explode
+  // on large corpora. Keep the tail — that's what the user most recently
+  // scrolled past and what matters for the current view.
   SPANS.length = 0;
-  newSpans.forEach(sp => SPANS.push(sp));
+  const capped = newSpans.length > EXPLORER_SPAN_CAP
+    ? newSpans.slice(newSpans.length - EXPLORER_SPAN_CAP)
+    : newSpans;
+  capped.forEach(sp => SPANS.push(sp));
 
   // Approximate link counts from CON targets (both subject + object sides).
   for (const e of entries) {
@@ -10781,8 +10880,16 @@ function syncExplorerFromIngest(){
     if (typeof ob === 'string' && entMap.has(ob)) entMap.get(ob).links += 1;
   }
 
+  // Cap entities at EXPLORER_ENTITY_CAP by keeping the most-referenced
+  // (ops × links is a crude but fast proxy for downstream relevance).
   ENT.length = 0;
-  entMap.forEach(r => ENT.push(r));
+  let entList = [];
+  entMap.forEach(r => entList.push(r));
+  if (entList.length > EXPLORER_ENTITY_CAP) {
+    entList.sort((a, b) => (b.links + b.ops.length) - (a.links + a.ops.length));
+    entList = entList.slice(0, EXPLORER_ENTITY_CAP);
+  }
+  entList.forEach(r => ENT.push(r));
 
   // ── Graph: entities → nodes (radial layout), CON → edges ──
   GNODES.length = 0; GEDGES.length = 0;
@@ -10818,6 +10925,20 @@ function syncExplorerFromIngest(){
   rGraph(); rLegend();
   if (actTab === 'lib') rLib();
   if (actTab === 'evs') rEvLog();
+}
+
+// Debounced public entry point — coalesces back-to-back calls during ingest
+// so the explorer rebuild doesn't thrash the main thread.
+function syncExplorerFromIngest(){
+  if (_syncTimer) return;
+  const elapsed = Date.now() - _syncLastRun;
+  const wait = Math.max(0, EXPLORER_SYNC_DEBOUNCE_MS - elapsed);
+  _syncTimer = setTimeout(() => {
+    _syncTimer = 0;
+    _syncLastRun = Date.now();
+    try { _syncExplorerFromIngestNow(); }
+    catch (err) { console.error('explorer sync failed', err); }
+  }, wait);
 }
 
 // Expose on window for the ingest script to call
