@@ -8102,22 +8102,51 @@ function escapeHtml(str) {
 .btn-action:hover{background:var(--amberB);}
 .split-eo-note{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--td);margin-left:auto;}
 
-/* LIBRARY */
-#tab-lib{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:5px;display:none;}
-.ecard{background:var(--s1);border:1px solid var(--b0);border-radius:4px;padding:9px 11px;cursor:pointer;transition:all .13s;display:grid;grid-template-columns:1fr auto;gap:6px;}
-.ecard:hover{border-color:rgba(196,129,58,.4);background:var(--s2);}
-.ecard.sel{border-color:var(--amber);background:var(--amberD);}
-.ecard.split-child{border-color:rgba(196,90,138,.3);}
-.ec-l{display:flex;flex-direction:column;gap:3px;}
-.ec-name{font-family:'Spectral',serif;font-size:14px;}
-.ecard.sel .ec-name{color:var(--amber);}
-.ecard.split-child .ec-name{color:var(--split);}
-.ec-type{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--td);letter-spacing:.1em;text-transform:uppercase;}
-.ec-ops{display:flex;gap:3px;flex-wrap:wrap;margin-top:1px;}
-.ec-r{display:flex;flex-direction:column;align-items:flex-end;justify-content:space-between;gap:3px;}
-.ec-conf{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--td);}
-.ec-spans{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--ts);}
-.ec-prov{font-family:'Spectral',serif;font-size:9px;color:var(--td);font-style:italic;max-width:100px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* GLOSS (was Library) */
+#tab-lib{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px;display:none;}
+.gl-empty-panel{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--td);padding:18px;text-align:center;font-style:italic;}
+.glcard{background:var(--s1);border:1px solid var(--b0);border-radius:4px;padding:11px 13px;display:flex;flex-direction:column;gap:8px;transition:border-color .13s;}
+.glcard.sel{border-color:var(--amber);background:var(--amberD);}
+.gl-hdr{display:flex;align-items:baseline;justify-content:space-between;gap:10px;border-bottom:1px solid var(--b1);padding-bottom:6px;flex-wrap:wrap;}
+.gl-name{font-family:'Spectral',serif;font-size:16px;color:var(--tp);cursor:pointer;}
+.gl-name:hover{color:var(--amber);}
+.glcard.sel .gl-name{color:var(--amber);}
+.gl-meta{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+.gl-type{font-family:'IBM Plex Mono',monospace;font-size:8.5px;color:var(--td);letter-spacing:.12em;}
+.gl-conf{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--ts);}
+.gl-hub-chip{font-family:'IBM Plex Mono',monospace;font-size:8.5px;color:var(--gold);border:1px solid rgba(200,160,64,.35);padding:1px 5px;border-radius:2px;letter-spacing:.08em;}
+.gl-stance{font-family:'IBM Plex Mono',monospace;font-size:8.5px;padding:1px 5px;border:1px solid;border-radius:2px;letter-spacing:.08em;}
+.gl-section{display:grid;grid-template-columns:64px 1fr;gap:10px;align-items:start;}
+.gl-sec-lbl{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--td);letter-spacing:.15em;padding-top:2px;}
+.gl-sec-n{color:var(--ts);letter-spacing:0;font-size:9px;}
+.gl-sec-body{display:flex;flex-direction:column;gap:3px;min-width:0;}
+.gl-id-line{font-family:'Spectral',serif;font-size:12.5px;line-height:1.5;color:var(--ts);}
+.gl-id-des,.gl-id-def{display:flex;gap:6px;align-items:baseline;}
+.gl-id-op{flex-shrink:0;}
+.gl-phase-row{flex-direction:row;flex-wrap:wrap;align-items:center;gap:2px;}
+.gl-phase{font-family:'IBM Plex Mono',monospace;font-size:10px;padding:1px 5px;border:1px solid;border-radius:2px;letter-spacing:.04em;display:inline-flex;align-items:center;gap:3px;}
+.gl-phase-n{font-size:8px;opacity:.7;}
+.gl-phase-arrow{color:var(--td);font-size:9px;padding:0 1px;}
+.gl-io-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.gl-io-grid .gl-section{grid-template-columns:1fr;gap:3px;}
+.gl-io-grid .gl-sec-lbl{padding:0;display:flex;justify-content:space-between;align-items:baseline;}
+.gl-io-row{display:grid;grid-template-columns:12px 1fr auto;gap:6px;padding:4px 6px;background:var(--s0);border:1px solid transparent;border-radius:2px;cursor:pointer;font-size:11px;align-items:baseline;}
+.gl-io-row:hover{border-color:var(--b0);background:var(--s2);}
+.gl-io-arrow{color:var(--td);font-family:'IBM Plex Mono',monospace;font-size:10px;}
+.gl-io-target{font-family:'Spectral',serif;color:var(--tp);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.gl-io-op{font-family:'IBM Plex Mono',monospace;font-size:9px;}
+.gl-io-pred{grid-column:2 / span 2;font-family:'Spectral',serif;font-style:italic;color:var(--ts);font-size:10.5px;line-height:1.35;margin-top:1px;}
+.gl-pred-mute{color:var(--td);}
+.gl-empty{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--td);font-style:italic;padding:3px 0;}
+.gl-gap,.gl-rec{font-family:'Spectral',serif;font-size:11.5px;line-height:1.45;display:flex;gap:5px;align-items:baseline;}
+.gl-gap{color:var(--eva);}
+.gl-rec{color:var(--rec);}
+.gl-gap-txt,.gl-rec-txt{color:var(--ts);}
+.gl-quote{font-family:'Spectral',serif;font-size:11.5px;line-height:1.6;color:var(--ts);background:var(--s0);padding:7px 10px;border-radius:3px;border-left:2px solid var(--amber);cursor:pointer;margin-top:2px;}
+.gl-quote:hover{background:var(--s2);}
+.gl-quote-pre,.gl-quote-post{color:var(--td);}
+.gl-quote-hit{padding:0 2px;border-radius:2px;}
+.gl-quote-ref{display:block;margin-top:4px;font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--amber);font-style:normal;}
 
 /* EVENTS */
 #tab-evs{flex:1;overflow-y:auto;display:none;}
@@ -8195,7 +8224,7 @@ function escapeHtml(str) {
     <div class="tab-bar">
       <div class="tab act" data-tab="doc">Docs</div>
       <div class="tab" data-tab="inspect">Inspect</div>
-      <div class="tab" data-tab="lib">Library</div>
+      <div class="tab" data-tab="lib">Gloss</div>
       <div class="tab" data-tab="evs">Events</div>
       <div class="tab-search"><input class="srch" id="srch" placeholder="search…" type="text"></div>
     </div>
@@ -8740,32 +8769,210 @@ function rSplitControls(entId){
 // ═══════════════════════════════════════════════════
 // RENDER — LIBRARY & EVENTS
 // ═══════════════════════════════════════════════════
-function rLib(){
-  let F=ENT;
-  if(actSrc)F=F.filter(e=>SPANS.some(sp=>sp.eid===e.id&&sp.src===actSrc));
-  if(actOp)F=F.filter(e=>e.ops.includes(actOp));
-  if(actType)F=F.filter(e=>e.type===actType);
-  if(q){const lq=q.toLowerCase();F=F.filter(e=>e.name.toLowerCase().includes(lq)||e.desc.toLowerCase().includes(lq));}
-  const g=document.getElementById('tab-lib');
-  if(!F.length){g.innerHTML='<div class="empty">No entities match filters</div>';return;}
-  g.innerHTML=F.map(e=>{
-    const spCount=SPANS.filter(sp=>sp.eid===e.id).length;
-    const srcCount=new Set(SPANS.filter(sp=>sp.eid===e.id).map(sp=>sp.src)).size;
-    const coh=cohesionScore(e.id);
-    const isSplit=!!e.splitFrom;
-    return `<div class="ecard ${actEnt===e.id?'sel':''} ${isSplit?'split-child':''}" onclick="sEnt('${e.id}')">
-      <div class="ec-l">
-        <div class="ec-name">${e.name}</div>
-        <div class="ec-type">${e.type}${isSplit?' · ⌥ split':''}</div>
-        <div class="ec-ops">${e.ops.map(op=>badge(op)).join('')}</div>
-      </div>
-      <div class="ec-r">
-        <div class="ec-conf">${Math.round(e.conf*100)}%</div>
-        <div class="ec-spans">${spCount}sp · ${srcCount}src</div>
-        <div class="ec-prov" style="color:${coh>=85?'var(--green)':coh>=65?'var(--amber)':'var(--eva)'};">${coh}% coh</div>
-      </div>
+// ── Gloss: read the corpus per-concept and assemble a definitional card ──
+// For each entity, derive:
+//   • Identity   — what the corpus converged on calling it (desc, DES, DEF)
+//   • Phase      — the operator histogram (INS → DES → CON → SYN → DEF → EVA)
+//   • Inputs     — CON/SYN edges where this concept is the object (receives)
+//   • Outputs    — CON/SYN edges where this concept is the subject (acts)
+//   • Gaps       — NUL events + evs whose resolution notes an absence
+//   • Open       — REC events flagged for human review
+//   • Quote      — a representative span pulled from the source text
+// Every row is a projection over ENT / SPANS / GEDGES / DOCS; nothing is
+// hand-written. This works in both demo mode (seeded ENT/SPANS/GEDGES) and
+// live mode (populated by syncExplorerFromIngest from state.combined).
+function computeGloss(e){
+  const mySpans = SPANS.filter(sp=>sp.eid===e.id);
+  const myEvs   = e.evs || [];
+
+  // Phase histogram — prefer span ops (authoritative in both modes), fall
+  // back to evs ops for demo records without span coverage.
+  const phaseCount = {};
+  mySpans.forEach(sp=>{ if(sp.op) phaseCount[sp.op]=(phaseCount[sp.op]||0)+1; });
+  if(!Object.keys(phaseCount).length){
+    myEvs.forEach(ev=>{ if(ev.op) phaseCount[ev.op]=(phaseCount[ev.op]||0)+1; });
+  }
+  const phaseOrder = ['ins','des','seg','con','syn','def','eva','rec','nul'];
+  const phases = phaseOrder.filter(op=>phaseCount[op]);
+
+  // Inputs / outputs from the graph. CON is the primary directed relation;
+  // SYN is treated as a fusion-hub relation (the hub synthesizes inputs).
+  const outs=[], ins=[];
+  (GEDGES||[]).forEach(edge=>{
+    if(!edge||edge.f===edge.t) return;
+    const src  = ENT.find(x=>x.id===edge.f);
+    const targ = ENT.find(x=>x.id===edge.t);
+    if(!src || !targ) return;
+    if(edge.f===e.id) outs.push({other:targ, edgeOp:edge.op});
+    else if(edge.t===e.id) ins.push({other:src, edgeOp:edge.op});
+  });
+
+  // Best-effort predicate: scan this entity's evs for one whose site/res
+  // mentions the other entity — that ev's resolution is likely the verb/
+  // relation phrase that formed the edge. (In live mode we'd pull from
+  // M.conEdges.predicate, but the explorer bridge doesn't carry it yet.)
+  const attachPredicate = (list)=>list.map(rel=>{
+    const tokens = rel.other.name.toLowerCase().split(/\s+/).filter(t=>t.length>2);
+    let hit=null;
+    const preferred = myEvs.filter(ev=>ev.op==='con'||ev.op==='syn');
+    for(const ev of [...preferred, ...myEvs]){
+      const txt = `${ev.site||''} ${ev.res||''}`.toLowerCase();
+      if(tokens.some(tok=>txt.includes(tok))){ hit=ev; break; }
+    }
+    return { ...rel,
+      predicate: hit ? (hit.res||hit.site) : null,
+      ref: hit?.ref || null,
+    };
+  });
+  const inputs  = attachPredicate(ins);
+  const outputs = attachPredicate(outs);
+
+  // Identity block
+  const desEvs = myEvs.filter(ev=>ev.op==='des');
+  const defEvs = myEvs.filter(ev=>ev.op==='def');
+
+  // Gaps: explicit NUL events + evs whose resolution matches absence markers
+  const absenceRx = /\b(undisclosed|no (such|valid|mandatory|audit)|declined|not (been|disclosed|considered|publicly)|isolated from|no authorization)\b/i;
+  const gaps = myEvs.filter(ev=>ev.op==='nul' || absenceRx.test(ev.res||''));
+  const opens = myEvs.filter(ev=>ev.op==='rec');
+
+  // Dominant reading posture — the operator that fired most often on this
+  // concept. SYN-heavy → fusion hub; EVA-heavy → contested / interpreted;
+  // CON-heavy → relational actor; DES/DEF-heavy → definitional.
+  const ranked = Object.entries(phaseCount).sort((a,b)=>b[1]-a[1]);
+  const dominantOp = ranked[0]?.[0] || null;
+
+  const isHub = (phaseCount['syn']||0) > 0 || outputs.length >= 3;
+  const hubDegree = inputs.length + outputs.length;
+
+  // Representative quote: longest span wins (proxy for most-informative).
+  let quote=null;
+  const byLen = mySpans.slice().sort((a,b)=>((b.match||'').length)-((a.match||'').length));
+  if(byLen.length){
+    const sp = byLen[0];
+    const docText = DOCS[sp.src]?.text || '';
+    const docTitle = DOCS[sp.src]?.title || sp.src;
+    if(typeof sp.start==='number' && typeof sp.end==='number' && sp.end<=docText.length){
+      const cs=Math.max(0,sp.start-40), ce=Math.min(docText.length,sp.end+80);
+      quote = {
+        prefix: docText.slice(cs, sp.start),
+        match:  docText.slice(sp.start, sp.end),
+        suffix: docText.slice(sp.end, ce),
+        spanId: sp.id, op: sp.op,
+        ref: `${docTitle} · [${sp.start}:${sp.end}]`,
+      };
+    } else if(sp.match){
+      quote = { prefix:'', match:sp.match, suffix:'', spanId:sp.id, op:sp.op||'ins', ref:DOCS[sp.src]?.title||'' };
+    }
+  }
+
+  return { phases, phaseCount, dominantOp, inputs, outputs,
+           isHub, hubDegree, desEvs, defEvs, gaps, opens, quote };
+}
+
+function renderGlossCard(e){
+  const gl = computeGloss(e);
+
+  const phaseTrace = gl.phases.map(op=>{
+    const o = opOf(op);
+    return `<span class="gl-phase" style="color:${o.col};border-color:rgba(${rgb(o.col)},.35);" title="${o.name} · ${gl.phaseCount[op]}×">${o.sym}<span class="gl-phase-n">${gl.phaseCount[op]}</span></span>`;
+  }).join('<span class="gl-phase-arrow">→</span>');
+
+  const renderIO = (list, dir)=>{
+    if(!list.length) return `<div class="gl-empty">— none —</div>`;
+    return list.map(r=>{
+      const o = opOf(r.edgeOp);
+      const arrow = dir==='in' ? '←' : '→';
+      const predHtml = r.predicate
+        ? `<div class="gl-io-pred">${esc(String(r.predicate).slice(0,120))}</div>`
+        : `<div class="gl-io-pred"><span class="gl-pred-mute">${esc(o.name.toLowerCase())}</span></div>`;
+      return `<div class="gl-io-row" onclick="sEnt('${r.other.id}')" title="jump to ${esc(r.other.name)}">
+        <span class="gl-io-arrow">${arrow}</span>
+        <span class="gl-io-target">${esc(r.other.name)}</span>
+        <span class="gl-io-op" style="color:${o.col};">${o.sym}</span>
+        ${predHtml}
+      </div>`;
+    }).join('');
+  };
+
+  const idLines = [];
+  if(e.desc) idLines.push(`<div class="gl-id-line">${esc(e.desc)}</div>`);
+  gl.desEvs.slice(0,2).forEach(ev=>idLines.push(
+    `<div class="gl-id-line gl-id-des"><span class="gl-id-op">${badge('des')}</span><span>${esc(ev.res||ev.site||'')}</span></div>`));
+  gl.defEvs.slice(0,2).forEach(ev=>idLines.push(
+    `<div class="gl-id-line gl-id-def"><span class="gl-id-op">${badge('def')}</span><span>${esc(ev.res||ev.site||'')}</span></div>`));
+
+  const gapsHtml = gl.gaps.slice(0,3).map(ev=>
+    `<div class="gl-gap">∅ <span class="gl-gap-txt">${esc(ev.res||ev.site||'')}</span></div>`).join('');
+  const opensHtml = gl.opens.slice(0,3).map(ev=>
+    `<div class="gl-rec">↬ <span class="gl-rec-txt">${esc(ev.res||ev.site||'')}</span></div>`).join('');
+
+  let quoteHtml='';
+  if(gl.quote){
+    const qo = opOf(gl.quote.op);
+    quoteHtml = `<div class="gl-quote" onclick="jumpToSpan('${gl.quote.spanId}')">
+      <span class="gl-quote-pre">${gl.quote.prefix?'…':''}${esc(gl.quote.prefix.slice(-40))}</span><span class="gl-quote-hit" style="background:rgba(${rgb(qo.col)},.22);color:${qo.col};">${esc(gl.quote.match)}</span><span class="gl-quote-post">${esc(gl.quote.suffix.slice(0,100))}${gl.quote.suffix?'…':''}</span>
+      <span class="gl-quote-ref">${esc(gl.quote.ref||'')}</span>
     </div>`;
-  }).join('');
+  }
+
+  const hubChip    = gl.isHub ? `<span class="gl-hub-chip">hub · deg ${gl.hubDegree}</span>` : '';
+  const stanceChip = gl.dominantOp
+    ? `<span class="gl-stance" style="color:${opOf(gl.dominantOp).col};border-color:rgba(${rgb(opOf(gl.dominantOp).col)},.4);">${opOf(gl.dominantOp).sym} posture</span>` : '';
+
+  return `<div class="glcard ${actEnt===e.id?'sel':''}" data-eid="${e.id}">
+    <div class="gl-hdr">
+      <div class="gl-name" onclick="sEnt('${e.id}')">${esc(e.name)}</div>
+      <div class="gl-meta">
+        <span class="gl-type">${esc(e.type||'')}</span>
+        <span class="gl-conf">${Math.round((e.conf||0)*100)}%</span>
+        ${hubChip}
+        ${stanceChip}
+      </div>
+    </div>
+    ${idLines.length ? `<div class="gl-section"><div class="gl-sec-lbl">IS</div><div class="gl-sec-body">${idLines.join('')}</div></div>` : ''}
+    <div class="gl-section">
+      <div class="gl-sec-lbl">PHASE</div>
+      <div class="gl-sec-body gl-phase-row">${phaseTrace || '<span class="gl-empty">no mentions</span>'}</div>
+    </div>
+    <div class="gl-io-grid">
+      <div class="gl-section">
+        <div class="gl-sec-lbl">INPUTS <span class="gl-sec-n">(${gl.inputs.length})</span></div>
+        <div class="gl-sec-body">${renderIO(gl.inputs,'in')}</div>
+      </div>
+      <div class="gl-section">
+        <div class="gl-sec-lbl">OUTPUTS <span class="gl-sec-n">(${gl.outputs.length})</span></div>
+        <div class="gl-sec-body">${renderIO(gl.outputs,'out')}</div>
+      </div>
+    </div>
+    ${gapsHtml ? `<div class="gl-section"><div class="gl-sec-lbl">GAPS</div><div class="gl-sec-body">${gapsHtml}</div></div>` : ''}
+    ${opensHtml ? `<div class="gl-section"><div class="gl-sec-lbl">OPEN</div><div class="gl-sec-body">${opensHtml}</div></div>` : ''}
+    ${quoteHtml ? `<div class="gl-section"><div class="gl-sec-lbl">QUOTE</div><div class="gl-sec-body">${quoteHtml}</div></div>` : ''}
+  </div>`;
+}
+
+function rLib(){
+  let F = ENT;
+  if(actSrc) F = F.filter(e=>SPANS.some(sp=>sp.eid===e.id && sp.src===actSrc));
+  if(actOp)  F = F.filter(e=>e.ops.includes(actOp));
+  if(actType)F = F.filter(e=>e.type===actType);
+  if(q){
+    const lq=q.toLowerCase();
+    F = F.filter(e=>e.name.toLowerCase().includes(lq) || (e.desc||'').toLowerCase().includes(lq));
+  }
+  const g = document.getElementById('tab-lib');
+  if(!F.length){
+    g.innerHTML = '<div class="gl-empty-panel">No concepts match filters. Ingest a document in INGEST view or clear filters.</div>';
+    return;
+  }
+  // Salience sort: mentions + link-degree. Puts hubs / frequently-referenced
+  // concepts at the top so the reader lands on the load-bearing nodes first.
+  F = F.slice().sort((a,b)=>{
+    const am = SPANS.filter(sp=>sp.eid===a.id).length + (a.links||0);
+    const bm = SPANS.filter(sp=>sp.eid===b.id).length + (b.links||0);
+    return bm - am;
+  });
+  g.innerHTML = F.map(renderGlossCard).join('');
 }
 
 function rEvLog(){
