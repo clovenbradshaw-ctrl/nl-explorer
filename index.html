@@ -3195,11 +3195,17 @@ function findVerbBetween(sentText, normA, normB) {
   return m[1];
 }
 
-function stageCON_cooccurrence(log, sentences, entityAnchors, da) {
+function stageCON_cooccurrence(log, sentences, entityAnchors, da, candidateAnchors) {
   // O(s·m) rewrite: build one regex union over all canonicals and
   // scan each sentence once. The prior impl ran a separate regex
   // per entity per sentence (O(s·m²)), which dominated ingest time
   // on multi-thousand-entity corpora.
+  //
+  // candidateAnchors (optional) is the worker's pre-INS candidate set
+  // ({normalized: {anchor, integral, sig_count}}). When a sentence
+  // contains an INS'd entity AND a candidate, we emit a SIG_EVIDENCE
+  // (not a CON) — co-occurrence with an established entity is evidence
+  // that should boost the candidate toward INS, not a structural edge.
   const norms = Object.keys(entityAnchors);
   if (norms.length === 0) return;
   const pattern = norms
@@ -3219,6 +3225,41 @@ function stageCON_cooccurrence(log, sentences, entityAnchors, da) {
         seen.set(norm, true);
       }
     }
+    // Candidate co-occurrence — feed pre-INS candidates appearing alongside
+    // INS'd entities back as SIG_EVIDENCE so they accumulate toward θ_INS.
+    if (candidateAnchors && seen.size >= 1) {
+      const candNorms = Object.keys(candidateAnchors);
+      if (candNorms.length) {
+        const candPattern = candNorms
+          .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .sort((a, b) => b.length - a.length)
+          .join('|');
+        const candRe = new RegExp('\\b(' + candPattern + ')\\b', 'gi');
+        let cm;
+        const candSeen = new Set();
+        while ((cm = candRe.exec(lower)) !== null) {
+          const cn = cm[1].toLowerCase();
+          if (candidateAnchors[cn] && !candSeen.has(cn)) candSeen.add(cn);
+        }
+        for (const cn of candSeen) {
+          const cInfo = candidateAnchors[cn];
+          log.push(makeEntry('SIG',
+            anchor('sig:cooc:' + cInfo.anchor + ':' + sent.start),
+            cInfo.anchor, {
+              text: cn, normalized: cn,
+              detector: 'COOC_EVIDENCE',
+              note: 'co-occurs with INS\'d entity — candidate evidence',
+            }, {
+              source: 'mechanical:cooc_evidence',
+              span_start: sent.start,
+              span_end: sent.end,
+              doc_anchor: da,
+              confidence: 0.55,
+            }));
+        }
+      }
+    }
+
     if (seen.size < 2) continue;
     const present = [...seen.keys()].map(norm => ({ norm, ca: entityAnchors[norm] }));
 
@@ -3403,7 +3444,7 @@ function stageEVA_structural(combinedLog, allLogs) {
 }
 
 
-function stageNUL(log, text, da) {
+async function stageNUL(log, text, da) {
   const pat = ABSENCE_PATTERNS[_currentScript] || ABSENCE_PATTERNS.latin;
   const re = new RegExp(pat.source, pat.flags.includes('g') ? pat.flags : pat.flags+'g');
   let m;
@@ -3419,6 +3460,42 @@ function stageNUL(log, text, da) {
       doc_anchor: da,
       confidence: 0.85,
     }));
+  }
+
+  // Structural NUL — for each entity-shaped noun phrase that the document
+  // declares as a slot (via the signal text), ask the fold worker for the
+  // slot's integral state. `unknown` (SIG accumulated, never crossed
+  // θ_INS) and `cleared` (INS'd then decayed) are structural absences,
+  // not keyword matches (spec §"Three NUL states from integral history").
+  if (workerBridge.ready) {
+    const slotMatches = log.byOp('NUL')
+      .filter(e => e.operand?.absence_type === 'explicit_claim')
+      .map(e => (e.operand?.signal || '').replace(/[^A-Za-z0-9 ]/g, '').trim())
+      .filter(s => s.length >= 3 && s.length < 60);
+    const seenSlots = new Set();
+    for (const slot of slotMatches) {
+      const norm = slot.toLowerCase();
+      if (seenSlots.has(norm)) continue;
+      seenSlots.add(norm);
+      try {
+        const state = await workerRequest(
+          workerBridge.foldWorker, 'nul_state_for_slot', { slot: norm }
+        );
+        if (!state || state.state === 'active') continue;
+        log.push(makeEntry('NUL',
+          anchor('nul:struct:' + norm + ':' + da),
+          `doc:${da}`, {
+            signal: slot,
+            absence_type: 'structural_' + state.state,
+            integral_value: parseFloat((state.integral || 0).toFixed(3)),
+            note: `slot "${slot}" — integral state: ${state.state}`,
+          }, {
+            source: 'mechanical:nul_structural',
+            doc_anchor: da,
+            confidence: 0.9,
+          }));
+      } catch {}
+    }
   }
 }
 
@@ -3680,6 +3757,30 @@ async function stageEmbeddingClassify(log, da) {
   // later with a _getMechanicalOp(clauseEntry) that reads surface cues.
   const mechOps = clauseEntries.map(() => null);
 
+  // Fetch DEF frames + integrals from the fold worker so we can attach
+  // frame context to each classified clause and emit a `frame_test` EVA
+  // alongside the embedding classification (spec §"EVA with DEF context").
+  let frames = {}, integrals = {}, entityAnchors = {};
+  if (workerBridge.ready) {
+    try {
+      [frames, integrals, entityAnchors] = await Promise.all([
+        workerRequest(workerBridge.foldWorker, 'get_all_frames', { doc_anchor: da }),
+        workerRequest(workerBridge.foldWorker, 'get_integrals', { doc_anchor: da }),
+        workerRequest(workerBridge.foldWorker, 'get_entity_anchors', { doc_anchor: da }),
+      ]);
+      frames = frames || {}; integrals = integrals || {}; entityAnchors = entityAnchors || {};
+    } catch {}
+  }
+  // Pre-compute a union regex over INS'd canonicals so we can find which
+  // entities a clause mentions in O(text length) per clause.
+  const canonNorms = Object.keys(entityAnchors);
+  const entityRe = canonNorms.length
+    ? new RegExp('\\b(' + canonNorms
+        .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .sort((a, b) => b.length - a.length)
+        .join('|') + ')\\b', 'gi')
+    : null;
+
   const results = await window.EOClassifier.classifyClauses(
     clauses, _currentScript, mechOps,
     (done, total) => {
@@ -3714,6 +3815,56 @@ async function stageEmbeddingClassify(log, da) {
         confidence: Math.min(0.4 + r.confidence_gap * 4, 0.95),
       }
     ));
+
+    // Frame test EVA — for each entity in the clause that has a
+    // crystallized DEF frame, classify whether this clause's similarity
+    // profile satisfies / extends / contracts / conflicts with the
+    // frame. Weighted by the entity's current integral so highly
+    // foregrounded entities dominate the frame test (spec §"Change 3").
+    if (entityRe && Object.keys(frames).length) {
+      const clauseText = (seg.operand?.text || '').toLowerCase();
+      entityRe.lastIndex = 0;
+      const entitiesInClause = new Set();
+      let em;
+      while ((em = entityRe.exec(clauseText)) !== null) {
+        const a = entityAnchors[em[1].toLowerCase()];
+        if (a && frames[a]) entitiesInClause.add(a);
+      }
+      for (const a of entitiesInClause) {
+        const frame = frames[a];
+        const integ = integrals[a] || 0;
+        // Decide result by a simple structural test using the clause's
+        // top similarity cell against any neighbour cells the frame
+        // recorded. Without per-neighbour centroids, treat a high-
+        // confidence classification (gap > 0.15) as `extends`, low-
+        // confidence as `satisfies` (frame holds), and a flagged
+        // `mechanical_conflict` as `conflicts`.
+        let result = 'satisfies';
+        if (r.flags?.includes?.('mechanical_conflict')) result = 'conflicts';
+        else if ((r.confidence_gap || 0) > 0.15)        result = 'extends';
+        else if ((r.confidence_gap || 0) < 0.04)        result = 'contracts';
+
+        log.push(makeEntry('EVA',
+          anchor('eva:frame_test:' + seg.anchor + ':' + a),
+          a, {
+            eva_type: 'frame_test',
+            result,
+            entity_anchor: a,
+            entity_integral: parseFloat(integ.toFixed(3)),
+            frame_anchor: frame.anchor || a,
+            coherence_variance: frame.coherence_variance,
+            note: 'frame test weighted by entity integral',
+          }, {
+            source: 'mechanical:frame_test',
+            span_start: seg.provenance?.span_start,
+            span_end: seg.provenance?.span_end,
+            doc_anchor: da,
+            // Confidence is the integral-weighted classifier confidence —
+            // foregrounded entities matter more for the test.
+            confidence: Math.min(0.5 + (r.confidence_gap || 0) * (1 + integ * 0.1), 0.95),
+          }));
+      }
+    }
   }
 
   // Calibration check — if ≥60% of the first ~100 clauses classify flat
@@ -3735,6 +3886,34 @@ async function stageEmbeddingClassify(log, da) {
           note: `${Math.round(flatRate * 100)}% flat profiles — centroid undiscriminating for this corpus`,
         },
         { source: 'mechanical:calibration_check', doc_anchor: da, confidence: 1.0 }
+      ));
+
+      // Domain bootstrap (spec §"EVA calibration via integral
+      // bootstrapping"): cluster the first-100 clause results by their
+      // three-question cell assignments and treat the dominant cells as
+      // pseudo-centroids for the remainder of this document. Emit a DEF
+      // recording the bootstrap so the UI can show the calibration shift
+      // alongside the flat-profile notice.
+      const cellHistogram = new Map();
+      for (const r of sample) {
+        cellHistogram.set(r.cell_key, (cellHistogram.get(r.cell_key) || 0) + 1);
+      }
+      const dominantCells = [...cellHistogram.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([k, n]) => ({ cell_key: k, count: n }));
+      log.push(makeEntry('DEF',
+        anchor('def:bootstrap:' + da),
+        da,
+        {
+          param: 'classifier_mode',
+          value: 'domain_bootstrapped',
+          dominant_cells: dominantCells,
+          sample_size: sample.length,
+          note: 'pseudo-centroids derived from the first ' + sample.length +
+            ' clauses; subsequent EVA classification weights these cells',
+        },
+        { source: 'mechanical:domain_bootstrap', doc_anchor: da, confidence: 0.9 }
       ));
     }
   }
@@ -3894,6 +4073,9 @@ function queueEmbeddingLoop(combinedLog, delayMs = 150) {
 
 async function ingest(text, title, source, log) {
   if (!log) log = new OperatorLog();
+  // Register as the active ingest log so worker fold_event messages can
+  // mirror INS/DEF entries back into the in-flight log.
+  window.__activeIngestLog = log;
   // Yield to the event loop between stages so the UI can repaint and show
   // operator events as they stream in. Without this, the pipeline runs to
   // completion in one JS turn and the user sees nothing until the end.
@@ -3919,6 +4101,30 @@ async function ingest(text, title, source, log) {
   setStage(`SEG · ${sentences.length} sentences · ${_segClauses} clauses`);
   await yieldTick();
 
+  // Stream SIG/SEG entries to the fold worker as they're produced so the
+  // worker's integral-fold path owns INS instead of the main thread's
+  // count-based stageINS_threshold (spec §"Change 1"). The high-water
+  // mark advances after each batch; the post-ingest drain at the end
+  // skips entries already streamed.
+  let streamedHWM = 0;
+  const streamToFoldWorker = async () => {
+    if (!workerBridge.ready) return;
+    const all = log.entries();
+    const fresh = all.slice(streamedHWM);
+    if (!fresh.length) return;
+    streamedHWM = all.length;
+    for (const entry of fresh) {
+      // Don't round-trip worker-originated entries back to the worker.
+      if (entry.__from_worker) continue;
+      try {
+        await workerRequest(workerBridge.foldWorker, 'fold', entry);
+      } catch {}
+    }
+  };
+
+  // Stream the SEG entries first so grain queues are populated before SIGs.
+  await streamToFoldWorker();
+
   // 3. SIG — NP extraction (universal), pronouns, reframe signals
   setStage('SIG · extracting');
   const { clusters, mean, sd } = stageSIG_NPs(log, text, da);
@@ -3933,26 +4139,68 @@ async function ingest(text, title, source, log) {
   setStage(`SIG · ${clusters.length} NP clusters (${_npQualify} qualify z>1.0 gate)`);
   await yieldTick();
 
+  // Stream SIG entries — fold worker accumulates integrals and emits
+  // INS at threshold crossing. After flush, downstream stages see only
+  // INS'd entities.
+  await streamToFoldWorker();
+  if (workerBridge.ready) {
+    try { await workerRequest(workerBridge.foldWorker, 'flush', {}); } catch {}
+  }
+
   // 4. Detect explicit definition syntax
   const defSyntax = detectDefinitions(text);
 
-  // 5. INS — threshold-based entity instantiation
+  // 5. INS — entity anchors come from the fold worker's integral-fold
+  // path (spec §"Change 1"). The legacy stageINS_threshold remains as a
+  // fallback if the worker is unavailable (e.g. file:// context with no
+  // OPFS). When the worker is live, only entities that crossed θ_INS
+  // appear in entityAnchors — no quality filter required.
   setStage('INS · entities');
-  const entityAnchors = stageINS_threshold(log, clusters, mean, sd, da, text);
+  let entityAnchors = {};
+  if (workerBridge.ready) {
+    try {
+      entityAnchors = await workerRequest(
+        workerBridge.foldWorker, 'get_entity_anchors', { doc_anchor: da }
+      ) || {};
+    } catch (err) {
+      console.warn('get_entity_anchors failed; falling back to threshold:', err);
+      entityAnchors = stageINS_threshold(log, clusters, mean, sd, da, text);
+    }
+  } else {
+    entityAnchors = stageINS_threshold(log, clusters, mean, sd, da, text);
+  }
   const _insCount = Object.keys(entityAnchors).length;
-  const _insVisible = Object.keys(entityAnchors)
-    .filter(n => isDisplayableEntity('np:' + n)).length;
-  setStage(`INS · ${_insCount} entities promoted (${_insVisible} after quality filter)`);
+  setStage(`INS · ${_insCount} entities (integral-fold)`);
   await yieldTick();
 
   // 6. INS + DEF — explicitly defined terms (even below threshold)
   stageINS_definitions(log, defSyntax, entityAnchors, da);
+  await streamToFoldWorker();
+  if (workerBridge.ready) {
+    try { await workerRequest(workerBridge.foldWorker, 'flush', {}); } catch {}
+    // Re-fetch in case definition syntax promoted new entities.
+    try {
+      entityAnchors = await workerRequest(
+        workerBridge.foldWorker, 'get_entity_anchors', { doc_anchor: da }
+      ) || entityAnchors;
+    } catch {}
+  }
   await yieldTick();
 
-  // 7. CON — sentence-level co-occurrence + heuristic SPO (Phase 4 tier 1)
+  // 7. CON — sentence-level co-occurrence + heuristic SPO (Phase 4 tier 1).
+  // Now naturally gated: only INS'd anchors appear in entityAnchors, so
+  // the union regex emits no edges between non-instantiated candidates.
   setStage('CON · co-occurrence');
   const _conBefore = log.byOp('CON').length;
-  stageCON_cooccurrence(log, sentences, entityAnchors, da);
+  let candidateAnchors = null;
+  if (workerBridge.ready) {
+    try {
+      candidateAnchors = await workerRequest(
+        workerBridge.foldWorker, 'get_candidate_anchors', { doc_anchor: da }
+      );
+    } catch {}
+  }
+  stageCON_cooccurrence(log, sentences, entityAnchors, da, candidateAnchors);
   const _conAfter = log.byOp('CON').length;
   const _conEdges = log.byOp('CON');
   const _predEdges = _conEdges.filter(c => typeof hasPredicate === 'function' ? hasPredicate(c) : false).length;
@@ -3972,9 +4220,23 @@ async function ingest(text, title, source, log) {
   stageSYN(log, entityAnchors, da);
   await yieldTick();
 
-  // 9. DEF (frame) — structural hypothesis: CON neighborhood at this moment
+  // 9. DEF (frame) — crystallized via coherence variance in the fold
+  // worker (spec §"Change 3"). Worker emits DEF entries with
+  // neighbor_integrals, established_predicates, and coherence_variance.
+  // The legacy snapshot path is the fallback when the worker is offline.
   setStage('DEF · frames');
-  stageFrameDEF(log, entityAnchors, da);
+  await streamToFoldWorker();
+  if (workerBridge.ready) {
+    try { await workerRequest(workerBridge.foldWorker, 'flush', {}); } catch {}
+    try {
+      await workerRequest(workerBridge.foldWorker, 'crystallize_frames', { doc_anchor: da });
+    } catch (err) {
+      console.warn('crystallize_frames failed; falling back to snapshot:', err);
+      stageFrameDEF(log, entityAnchors, da);
+    }
+  } else {
+    stageFrameDEF(log, entityAnchors, da);
+  }
   await yieldTick();
 
   // 9b. EVA (embedding) — REMOVED from ingest.
@@ -3988,9 +4250,9 @@ async function ingest(text, title, source, log) {
   stageEVA_temporal(log, text, da);
   await yieldTick();
 
-  // 11. NUL — absence signals
+  // 11. NUL — absence signals (regex + structural integral state)
   setStage('NUL · absence');
-  stageNUL(log, text, da);
+  await stageNUL(log, text, da);
 
   // Surface classifier state explicitly so users don't wonder where
   // EVA went. Three-way: ready / unavailable / flat-profiles. The
@@ -4010,6 +4272,29 @@ async function ingest(text, title, source, log) {
     }
   } catch {}
 
+  // Final flush so any late worker-side emissions (DEF crystallization,
+  // structural NUL) make it back into the log via the fold_event mirror.
+  if (workerBridge.ready) {
+    try { await workerRequest(workerBridge.foldWorker, 'flush', {}); } catch {}
+    // Snapshot per-entity integrals into a rolling trajectory window so
+    // cross-doc convergence (stageSIM_candidates) has data to test
+    // against. One snapshot per ingest is the right granularity:
+    // documents are the natural sampling points.
+    try {
+      const integrals = await workerRequest(
+        workerBridge.foldWorker, 'get_integrals', {}
+      ) || {};
+      if (!window.__entityTrajectory) window.__entityTrajectory = new Map();
+      const TRAJ_WINDOW = 12;
+      for (const [a, v] of Object.entries(integrals)) {
+        const arr = window.__entityTrajectory.get(a) || [];
+        arr.push(v);
+        if (arr.length > TRAJ_WINDOW) arr.shift();
+        window.__entityTrajectory.set(a, arr);
+      }
+    } catch {}
+  }
+  window.__activeIngestLog = null;
   return { log, doc_anchor: da };
 }
 
@@ -4729,6 +5014,20 @@ async function initWorkers() {
         try { onFoldMUpdate(e.data.anchor, e.data.entry); } catch {}
       } else if (op === 'fold_event') {
         try { pushTickerEvent(e.data.entry); } catch {}
+        // Mirror worker-originated operator entries (INS, DEF, EVA, REC)
+        // into the active ingest log so downstream stages observe them.
+        // Without this, INS entries crystallized via integral threshold
+        // crossing in the worker never appear in log.byOp('INS').
+        try {
+          const activeLog = window.__activeIngestLog;
+          if (activeLog && e.data.entry && e.data.entry.__from_worker !== false) {
+            const entry = e.data.entry;
+            // Mark so a subsequent appendToLog/streamToFoldWorker doesn't
+            // round-trip the same entry back to the worker.
+            entry.__from_worker = true;
+            activeLog.push(entry);
+          }
+        } catch {}
       }
     };
     w.onerror = (err) => console.warn('worker error:', err?.message || err);
@@ -5505,8 +5804,15 @@ function runIngest() {
 
     // Phase 7/8: mirror every new log entry into the OPFS-backed Log Worker.
     // The Fold Worker observes via BroadcastChannel and folds into M state.
+    // (Note: ingest() now streams entries to the fold worker mid-pipeline so
+    // INS gating works; this drain remains for log-worker persistence and
+    // for the worker-mirrored entries that didn't go through it yet.)
     if (workerBridge.ready) {
       for (const entry of log.entries()) {
+        // appendToLog → log-worker → BroadcastChannel('eo-fold') → fold-worker.
+        // For entries the fold worker emitted itself (`__from_worker`), foldXXX
+        // dispatchers are idempotent on identity (entity exists, frame exists),
+        // so re-fold is a no-op cost. Persistence is the goal here.
         await appendToLog(entry);
       }
       // Phase 3: now that INS entries have populated the fold worker's grain
@@ -6564,6 +6870,37 @@ function stageSIM_candidates(combinedLog, allLogs) {
       const sim = computeEntitySimilarity(ancA, ancB, entries, sentenceIndex);
       if (sim.score < 0.25) continue;
 
+      // Trajectory convergence (spec §"Convergence as the coreference
+      // criterion"). When the cached integral snapshot for both anchors
+      // is available, compute the rolling similarity of integral values
+      // alongside the static structural score. Convergence is the
+      // criterion: similarity AND a small derivative.
+      let convergence = null;
+      const trajA = (window.__entityTrajectory || new Map()).get(ancA);
+      const trajB = (window.__entityTrajectory || new Map()).get(ancB);
+      if (trajA && trajB && trajA.length > 1 && trajB.length > 1) {
+        const n = Math.min(trajA.length, trajB.length);
+        let sumDiff = 0, sumMax = 0;
+        for (let k = 0; k < n; k++) {
+          const a = trajA[trajA.length - 1 - k] || 0;
+          const b = trajB[trajB.length - 1 - k] || 0;
+          sumDiff += Math.abs(a - b);
+          sumMax  += Math.max(a, b);
+        }
+        const trajSim = sumMax > 0 ? 1 - (sumDiff / sumMax) : 0;
+        // Derivative: change in trajSim over the last two windows
+        const halfA = trajA.slice(-Math.max(2, Math.floor(n / 2)));
+        const halfB = trajB.slice(-Math.max(2, Math.floor(n / 2)));
+        const meanA = halfA.reduce((x,y)=>x+y,0)/halfA.length;
+        const meanB = halfB.reduce((x,y)=>x+y,0)/halfB.length;
+        const stable = Math.abs(meanA - meanB) < 0.5;
+        convergence = {
+          trajectory_similarity: parseFloat(trajSim.toFixed(3)),
+          stable,
+          window: n,
+        };
+      }
+
       const a = anchor('sim:' + key);
           combinedLog.push(makeEntry('SIG', a, `pair:${ancA}:${ancB}`, {
             text: `${sim.nameA} ≈ ${sim.nameB}`,
@@ -6575,10 +6912,13 @@ function stageSIM_candidates(combinedLog, allLogs) {
             name_a: sim.nameA,
             name_b: sim.nameB,
             resolution_status: 'pending',
+            convergence,
           }, {
             source: 'mechanical:sim_candidates',
             doc_anchor: ancA,
-            confidence: sim.score,
+            confidence: convergence?.stable && convergence.trajectory_similarity > 0.7
+              ? Math.min(0.99, sim.score + 0.15)
+              : sim.score,
           }));
     }
   }
