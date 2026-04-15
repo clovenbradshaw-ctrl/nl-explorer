@@ -16,7 +16,34 @@ const M = {
   candidates:  new Map(), // candidate_anchor → CandidateEntity (pre-INS)
   pendingCons: [],        // [CONEntry] — CONs awaiting INS of one endpoint
   candidateToAnchor: new Map(), // candidate_id → permanent anchor (after INS)
+  // Verb integrals per ordered entity pair → { verb → integral_value }
+  // Tracks the document's own predicate vocabulary; verbs whose integral
+  // crosses VERB_PREDICATE_THRESHOLD become named predicates on the
+  // pair's DEF frame.
+  verbIntegrals: new Map(), // `${s}:${o}` → Map(verb → number)
+  // Per-document last crystallization snapshot for coherence-variance gating.
+  lastCrystallized: new Map(), // anchor → { variance, ts }
+  // Schema slots declared by the document (e.g. "authorization", "named
+  // party"). Each entry: { slot_norm: { ts_first_seen, doc_anchor } }.
+  // Used by structural NUL emission.
+  schemaSlots: new Map(),
 };
+
+// Structural-position multipliers for SIG strength (spec §"The wave fold").
+const STRUCTURAL_WEIGHT = {
+  subject:  1.0,
+  argument: 0.6,
+  citation: 0.15,
+  default:  0.6,
+};
+
+// Verb integral threshold — once a verb between an INS'd pair's integral
+// crosses this, it becomes an established predicate for the relationship.
+const VERB_PREDICATE_THRESHOLD = 1.5;
+
+// Coherence-variance threshold for DEF crystallization. When the variance
+// of a neighborhood's integrals drops below this, the frame is stable.
+const DEF_COHERENCE_THRESHOLD = 0.35;
 
 // ── Coref thresholds ──────────────────────────────────────────
 // Defaults per docs/coref.md §4 — tunable via COREF_CONFIG_UPDATE message.
@@ -152,6 +179,10 @@ function foldINS(entry) {
       last_mention_position: entry.ts,
       ins_coherence:         cand?.coherence_score ?? 1.0,
       ins_kind:              entry.operand?.kind || null,
+      // Stored at INS time so get_entity_anchors can return a
+      // {normalized → anchor} map without re-deriving display names.
+      normalized:            entry.operand?.display_name || cand?.normalized || null,
+      display_name:          entry.operand?.display_name || cand?.normalized || null,
     });
     ensureGrainValues(M.entities.get(a));
     // Promotion: remove the candidate record — it has graduated.
@@ -264,8 +295,158 @@ function foldCON(entry) {
   const ent = M.entities.get(s);
   if (ent && !ent.ops.includes('CON')) ent.ops.push('CON');
 
+  // Verb integral tracking (spec §"The document builds its own predicate
+  // vocabulary"). Increment integral for the surface verb between this
+  // pair; once it crosses VERB_PREDICATE_THRESHOLD the verb is treated
+  // as a named predicate at frame crystallization.
+  const verb = entry.operand?.verb;
+  if (verb && typeof verb === 'string') {
+    const vKey = key;
+    if (!M.verbIntegrals.has(vKey)) M.verbIntegrals.set(vKey, new Map());
+    const vMap = M.verbIntegrals.get(vKey);
+    const vNorm = verb.trim().toLowerCase();
+    vMap.set(vNorm, (vMap.get(vNorm) || 0) + (entry.provenance?.confidence || 0.6));
+  }
+
   markDirty(s);
   markDirty(o);
+}
+
+// Established predicates for an entity pair — verbs whose integral has
+// crossed VERB_PREDICATE_THRESHOLD, sorted high → low.
+function establishedPredicatesFor(s, o) {
+  const out = [];
+  const fwd = M.verbIntegrals.get(`${s}:${o}`);
+  const rev = M.verbIntegrals.get(`${o}:${s}`);
+  const merged = new Map();
+  if (fwd) for (const [v, n] of fwd) merged.set(v, (merged.get(v) || 0) + n);
+  if (rev) for (const [v, n] of rev) merged.set(v, (merged.get(v) || 0) + n);
+  for (const [v, n] of merged) {
+    if (n >= VERB_PREDICATE_THRESHOLD) out.push({ verb: v, integral: parseFloat(n.toFixed(3)) });
+  }
+  out.sort((a, b) => b.integral - a.integral);
+  return out;
+}
+
+// Coherence variance over an entity's INS'd neighbour set — variance of
+// neighbour integral values. Low variance ⇒ a stable, crystallized frame
+// (spec §"Coherence variance as the DEF crystallization signal").
+function neighborhoodVariance(anchor) {
+  const neigh = [];
+  for (const [k, edge] of M.conEdges) {
+    if (k.startsWith(anchor + ':') || k.endsWith(':' + anchor)) {
+      const other = edge.s === anchor ? edge.o : edge.s;
+      const oent = M.entities.get(other);
+      if (oent) neigh.push(oent.integral_value || 0);
+    }
+  }
+  if (neigh.length < 2) return { variance: Infinity, count: neigh.length, neighbors: neigh };
+  const mean = neigh.reduce((a, b) => a + b, 0) / neigh.length;
+  const variance = neigh.reduce((a, b) => a + (b - mean) ** 2, 0) / neigh.length;
+  return { variance, count: neigh.length, neighbors: neigh };
+}
+
+// Crystallize DEF frames for entities whose neighbourhood coherence
+// variance has dropped below DEF_COHERENCE_THRESHOLD since the last
+// crystallization. Replaces the main-thread snapshot stageFrameDEF.
+function crystallizeFrames(doc_anchor) {
+  let emitted = 0;
+  for (const [a, ent] of M.entities) {
+    if (!ent.ops.includes('INS')) continue;
+    if (doc_anchor && !ent.docs?.has?.(doc_anchor)) continue;
+
+    const { variance, count, neighbors } = neighborhoodVariance(a);
+    if (count < 2) continue;
+
+    const last = M.lastCrystallized.get(a);
+    // Re-crystallize only if this is the first time, or variance dropped
+    // meaningfully since the last snapshot.
+    const droppedEnough = !last || (last.variance - variance) > 0.05;
+    if (variance > DEF_COHERENCE_THRESHOLD && !droppedEnough) continue;
+
+    // Build neighbour set with integral values
+    const neighborSet = [];
+    const neighborWithIntegrals = [];
+    const relationTypes = new Set();
+    for (const [k, edge] of M.conEdges) {
+      let other = null;
+      if (k.startsWith(a + ':')) other = edge.o;
+      else if (k.endsWith(':' + a)) other = edge.s;
+      if (!other) continue;
+      const oent = M.entities.get(other);
+      if (!oent) continue;
+      neighborSet.push(other);
+      neighborWithIntegrals.push({ anchor: other, integral: oent.integral_value || 0 });
+      if (edge.predicate) relationTypes.add(edge.predicate);
+    }
+
+    // Established predicates across all neighbours (verbs that crossed
+    // the predicate threshold in the document's own usage).
+    const predicates = [];
+    for (const n of neighborSet) {
+      const verbs = establishedPredicatesFor(a, n);
+      for (const v of verbs) predicates.push({ neighbor: n, ...v });
+    }
+
+    const displayName = M.displayNames.get(a) || a;
+    const labelNames = neighborWithIntegrals
+      .slice()
+      .sort((x, y) => y.integral - x.integral)
+      .slice(0, 3)
+      .map(x => M.displayNames.get(x.anchor) || x.anchor)
+      .join(', ');
+    const frame_label = `${displayName}: related to ${labelNames}` +
+      (predicates.length ? ` via ${[...new Set(predicates.map(p => p.verb))].slice(0, 2).join(', ')}` : '');
+
+    const defEntry = makeEntryLocal('DEF',
+      anchorLocal('def:frame:' + a + ':' + (doc_anchor || 'global')),
+      a, {
+        param: 'frame',
+        value: anchorLocal(neighborSet.sort().join(':') + '|' + [...relationTypes].sort().join(':')),
+        frame_label,
+        neighbor_count: neighborSet.length,
+        neighbor_set: neighborSet,
+        neighbor_integrals: neighborWithIntegrals,
+        relation_types: [...relationTypes].sort(),
+        established_predicates: predicates,
+        coherence_variance: parseFloat(variance.toFixed(4)),
+        is_hub: !!ent.is_hub,
+        doc_anchor,
+        note: 'crystallized from coherence variance drop',
+        resolution: null,
+      }, {
+        source: 'mechanical:frame_crystallization',
+        doc_anchor,
+        confidence: 0.9,
+      });
+    fold(defEntry);
+    M.lastCrystallized.set(a, { variance, ts: Date.now() });
+    emitted++;
+  }
+  return { emitted };
+}
+
+// Structural NUL classification from integral history (spec §"Three NUL
+// states from integral history"). Given a slot name, return the state of
+// the document's evidence for that slot at the current position.
+function nulStateForSlot(slotNorm) {
+  // Look for a candidate or entity whose normalized form matches the slot.
+  const slotKey = slotNorm.trim().toLowerCase();
+  for (const ent of M.entities.values()) {
+    const norm = ent.normalized || ent.display_name || '';
+    if (norm.toLowerCase() === slotKey) {
+      if (ent.cleared) return { state: 'cleared', integral: ent.integral_value };
+      return { state: 'active', integral: ent.integral_value };
+    }
+  }
+  if (M.candidates) {
+    for (const c of M.candidates.values()) {
+      if ((c.normalized || '').toLowerCase() === slotKey) {
+        return { state: 'unknown', integral: c.integral_value };
+      }
+    }
+  }
+  return { state: 'never_set', integral: 0 };
 }
 
 function foldEVA(entry) {
@@ -310,7 +491,16 @@ function foldSIG(entry) {
     : (entry.operand?.normalized ? anchorLocal('np:' + entry.operand.normalized) : null);
   if (!target) return;
 
-  const strength = Math.max(0.1, entry.provenance?.confidence || 0.5);
+  // Structural-position weighting (spec §"The wave fold"). The emitter may
+  // tag the SIG with operand.structural_position ∈ {subject, argument,
+  // citation}. Default falls back to the prior confidence-only behaviour
+  // so emitters that don't yet attach position aren't penalised.
+  const baseConf = entry.provenance?.confidence || 0.5;
+  const posKind = entry.operand?.structural_position;
+  const posMult = posKind && STRUCTURAL_WEIGHT[posKind] !== undefined
+    ? STRUCTURAL_WEIGHT[posKind]
+    : 1.0;
+  const strength = Math.max(0.1, baseConf * posMult);
   const ent = M.entities.get(target);
   if (ent) {
     // Fold: I_e += σ, update per-grain integral, update coherence variance.
@@ -962,6 +1152,61 @@ self.onmessage = async (e) => {
     } else if (op === 'flush') {
       await flushDelta();
       self.postMessage({ id, result: 'flushed' });
+    } else if (op === 'get_entity_anchors') {
+      // Spec §"Change 1": return INS'd entities filtered by doc_anchor as
+      // a {normalized → anchor} map for downstream stages (CON, SYN, EVA)
+      // to gate on. Only entities that crossed the integral threshold
+      // appear here; pre-INS candidates do not.
+      const da = payload?.doc_anchor;
+      const out = {};
+      for (const [a, ent] of M.entities) {
+        if (!ent.ops?.includes('INS')) continue;
+        if (da && !ent.docs?.has?.(da)) continue;
+        const norm = (ent.normalized || ent.display_name || M.displayNames.get(a) || '')
+          .trim().toLowerCase();
+        if (!norm) continue;
+        if (!out[norm]) out[norm] = a;
+      }
+      self.postMessage({ id, result: out });
+    } else if (op === 'get_candidate_anchors') {
+      // Pre-INS candidates with their accumulated integrals — used by
+      // stageCON to route co-occurrence as SIG_EVIDENCE rather than CON.
+      const out = {};
+      const cands = M.candidates || new Map();
+      for (const [a, c] of cands) {
+        const norm = (c.normalized || '').trim().toLowerCase();
+        if (!norm) continue;
+        out[norm] = {
+          anchor: a,
+          integral: c.integral_value || 0,
+          sig_count: c.sig_count || 0,
+        };
+      }
+      self.postMessage({ id, result: out });
+    } else if (op === 'get_integrals') {
+      const da = payload?.doc_anchor;
+      const out = {};
+      for (const [a, ent] of M.entities) {
+        if (da && !ent.docs?.has?.(da)) continue;
+        out[a] = ent.integral_value || 0;
+      }
+      self.postMessage({ id, result: out });
+    } else if (op === 'get_all_frames') {
+      const da = payload?.doc_anchor;
+      const out = {};
+      for (const [a, frame] of M.defFrames) {
+        if (da && frame.doc_anchor && frame.doc_anchor !== da) continue;
+        out[a] = frame;
+      }
+      self.postMessage({ id, result: out });
+    } else if (op === 'crystallize_frames') {
+      const r = crystallizeFrames(payload?.doc_anchor);
+      self.postMessage({ id, result: r });
+    } else if (op === 'nul_state_for_slot') {
+      // Resolve the structural NUL state for a named slot (never_set /
+      // unknown / cleared / active) from integral history. Used by main-
+      // thread stageNUL to back keyword matches with structural evidence.
+      self.postMessage({ id, result: nulStateForSlot(payload?.slot || '') });
     } else {
       self.postMessage({ id, error: 'unknown op: ' + op });
     }
