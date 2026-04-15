@@ -3909,6 +3909,19 @@ async function readOnFocus(target, grain, { overrideOrigin = null } = {}) {
   // Schedule pressure / REC reducer.
   queueEmbeddingLoop(log);
 
+  // Focus SIG (spec §6) — the act of reading feeds the integral live so the
+  // inspector's "related entities" queue reflects current attention. `dwell`
+  // is the strongest signal because it implies an embedding was generated.
+  try {
+    if (workerBridge?.foldWorker) {
+      workerRequest(workerBridge.foldWorker, 'focus_sig', {
+        anchor: target.anchor,
+        strength: overrideOrigin || (isReread ? 'click' : 'dwell'),
+        doc_anchor: state.currentDocAnchor || null,
+      }).catch(() => {});
+    }
+  } catch {}
+
   return { result, insAnchor, evaAnchor, isReread };
 }
 

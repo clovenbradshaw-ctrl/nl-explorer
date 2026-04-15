@@ -13,6 +13,41 @@ const M = {
   pressure:    new Map(), // anchor → {raw, z}
   spoIndex:    new Map(), // predicate_norm → [{s,p,o,cell_id,conf,span}]
   displayNames:new Map(), // anchor → string
+  candidates:  new Map(), // candidate_anchor → CandidateEntity (pre-INS)
+  pendingCons: [],        // [CONEntry] — CONs awaiting INS of one endpoint
+  candidateToAnchor: new Map(), // candidate_id → permanent anchor (after INS)
+};
+
+// ── Coref thresholds ──────────────────────────────────────────
+// Defaults per docs/coref.md §4 — tunable via COREF_CONFIG_UPDATE message.
+const COREF_CONFIG = {
+  candidate_new:        0.25,
+  ambiguous_low:        0.55,
+  merge_confident:      0.72,
+  ins_threshold:        4.0,
+  working_set:          1.5,
+  coherence_warning:    0.60,
+  cross_doc_seed:       2.0,
+  cross_doc_merge:      0.68,
+  resolution_high:      0.75,
+  resolution_ambiguous: 0.50,
+  // Per-grain base decay (applied on SEG of that grain).
+  // Values are the multiplier applied to per-entity grain_values — lower means
+  // faster decay. They correspond to λ_base in the spec via exp(-λ·elapsed),
+  // collapsed here to a single-step multiplier per SEG event.
+  decay: {
+    clause:    0.80,
+    sentence:  0.55,
+    paragraph: 0.36,   // ≈ 1/1.8 → paragraph multiplier from spec
+    section:   0.29,   // ≈ 1/3.5
+    document:  0.10,   // ≈ 1/10
+  },
+  // Focus-event signal strengths fed into the integral when the user reads.
+  focus_strength: {
+    hover: 0.10,
+    click: 0.35,
+    dwell: 1.00,
+  },
 };
 
 let checkpointDirty = false;
@@ -79,32 +114,54 @@ function fold(entry, record = true) {
 function foldINS(entry) {
   if (entry.target !== 'entity-registry') return;
   const a = entry.anchor;
-  const sig_count = entry.provenance?.sig_count || 1;
+  const sig_count = entry.provenance?.sig_count || entry.operand?.sig_count_at_ins || 1;
+  // If this INS promotes an existing candidate, inherit its accumulated state.
+  const cand = M.candidates?.get(a) || (entry.operand?.candidate_id
+    ? M.candidates?.get(entry.operand.candidate_id)
+    : null);
+
   if (!M.entities.has(a)) {
+    const base = Math.max(1, sig_count);
     M.entities.set(a, {
       anchor: a,
       ops: ['INS'],
       sig_count,
       ts_ins: entry.ts,
       docs: new Set([entry.provenance?.doc_anchor]),
+      nul_state: 'active',
       // ── Integral state ───────────────────────────────────────
       // I_e(p) at document position p — accumulated, decayed evidence.
-      integral_value: Math.max(1, sig_count),
-      // Per-grain integral snapshots (clause, sentence, paragraph, doc).
-      grain_values: [1, 1, 1, 1].map(() => Math.max(1, sig_count)),
-      // Running mean/variance of sig-event "strength" — coherence signal.
-      // Low variance = tight integral; a jump raises bifurcation warning.
-      coh_mean: 1,
-      coh_m2: 0,                // Welford's running M2
-      coh_n: sig_count,
-      coherence_score: 1.0,     // 1 / (1 + var)
+      integral_value: cand?.integral_value ?? base,
+      grain_values:   cand?.grain_values?.slice()
+                     ?? new Array(grainQueues.length).fill(base),
+      coh_mean:       cand?.coh_mean ?? 1,
+      coh_m2:         cand?.coh_m2   ?? 0,
+      coh_n:          cand?.coh_n    ?? sig_count,
+      coherence_score: cand?.coherence_score ?? 1.0,
+      accumulated_embedding: cand?.accumulated_embedding ?? null,
+      embedding_count:       cand?.embedding_count ?? 0,
+      surface_forms:         cand ? [...cand.surface_forms] : [],
       last_mention_position: entry.ts,
-      ins_coherence: 1.0,       // diagnostic: coherence at instantiation
+      ins_coherence:         cand?.coherence_score ?? 1.0,
+      ins_kind:              entry.operand?.kind || null,
     });
+    ensureGrainValues(M.entities.get(a));
+    // Promotion: remove the candidate record — it has graduated.
+    if (cand) {
+      M.candidates.delete(a);
+      const cid = entry.operand?.candidate_id;
+      if (cid && cid !== a) M.candidates.delete(cid);
+    }
   } else {
     const ent = M.entities.get(a);
     ent.docs.add(entry.provenance?.doc_anchor);
     ent.last_mention_position = entry.ts;
+    if (ent.cleared) {
+      // Re-ignition after decay — the spec allows cleared entities to return
+      // to active when new SIGs push them back above INS.
+      ent.cleared = false;
+      ent.nul_state = 'active';
+    }
   }
   pushToQueues(a, entry.ts);
 }
@@ -133,6 +190,53 @@ function foldCON(entry) {
   const s = entry.target;
   const o = entry.operand?.object_anchor;
   if (!s || !o) return;
+
+  // Premature CON (spec §5.2): if either endpoint is still a pre-INS candidate,
+  // queue this CON and emit a NUL marking the deferral. The drainer reprocesses
+  // it once both endpoints have INS'd.
+  const sReady = M.entities.has(s);
+  const oReady = M.entities.has(o);
+  const isMerge = entry.operand?.kind === 'entity_merge'
+               || entry.operand?.kind === 'cross_doc_merge_candidate'
+               || entry.operand?.kind === 'cross_doc_entity';
+  if ((!sReady || !oReady) && !entry.operand?.__deferred_retry && !isMerge) {
+    M.pendingCons.push(entry);
+    entry.operand.__deferred_retry = true; // prevent re-queue
+    const nulEntry = makeEntryLocal('NUL',
+      anchorLocal(`nul:premature:${s}:${o}:${Date.now()}`),
+      s, {
+        kind: 'premature_con',
+        signal: 'premature_con',
+        absence_type: 'endpoint_not_instantiated',
+        subject_anchor: s,
+        object_anchor: o,
+        subject_ready: sReady,
+        object_ready: oReady,
+      }, {
+        source: 'mechanical:integral_fold',
+        doc_anchor: entry.provenance?.doc_anchor,
+        confidence: 0.9,
+      });
+    fold(nulEntry);
+    return;
+  }
+
+  // Entity merge CON (spec §2.4) — one anchor absorbs the other.
+  if (entry.operand?.kind === 'entity_merge') {
+    const primary  = entry.operand.primary_anchor  || s;
+    const absorbed = entry.operand.absorbed_anchor || o;
+    const abs = M.entities.get(absorbed);
+    const pri = M.entities.get(primary);
+    if (pri && abs) {
+      pri.integral_value = (pri.integral_value || 0) + (abs.integral_value || 0);
+      pri.sig_count     = (pri.sig_count || 0) + (abs.sig_count || 0);
+      (abs.docs || []).forEach(d => pri.docs.add(d));
+      pri.surface_forms = [...new Set([...(pri.surface_forms||[]), ...(abs.surface_forms||[])])];
+      abs.merged_into = primary;
+      abs.nul_state = 'cleared';
+    }
+  }
+
   const key = `${s}:${o}`;
   const existing = M.conEdges.get(key);
   if (existing) {
@@ -192,7 +296,7 @@ function foldSIG(entry) {
   // canonical anchor; otherwise accumulate into a pre-INS candidate so we can
   // distinguish "unknown" (evidence but no INS) from "never-set" in NUL.
   const det = entry.operand?.detector;
-  if (det !== 'NP' && det !== 'ACCUMULATION') return;
+  if (det !== 'NP' && det !== 'ACCUMULATION' && det !== 'FOCUS') return;
   const target = entry.target && entry.target.startsWith('@')
     ? entry.target
     : (entry.operand?.normalized ? anchorLocal('np:' + entry.operand.normalized) : null);
@@ -233,13 +337,80 @@ function foldSIG(entry) {
     // "never-set" (no evidence at all) and "cleared" (post-INS decay).
     if (!M.candidates) M.candidates = new Map();
     const c = M.candidates.get(target) || {
-      anchor: target, integral_value: 0, sig_count: 0,
-      first_seen: entry.ts, normalized: entry.operand?.normalized,
+      anchor: target,
+      integral_value: 0,
+      sig_count: 0,
+      first_seen: entry.ts,
+      normalized: entry.operand?.normalized,
+      // Welford accumulator for a running mean embedding (spec §2.1).
+      accumulated_embedding: null,
+      embedding_count: 0,
+      surface_forms: new Set(),
+      coh_mean: 0, coh_m2: 0, coh_n: 0, coherence_score: 1.0,
+      grain_values: new Array(grainQueues.length).fill(0),
+      nul_state: 'unknown',
+      bifurcation_warning: false,
+      last_sig_position: entry.ts,
     };
     c.integral_value += strength;
+    const gv = ensureGrainValues(c);
+    for (let g = 0; g < gv.length; g++) gv[g] += strength;
     c.sig_count += 1;
     c.last_seen = entry.ts;
+    c.last_sig_position = entry.ts;
+    const sf = entry.operand?.text;
+    if (sf) c.surface_forms.add(sf);
+
+    // Welford mean of the mention embedding (when provided).
+    const emb = entry.operand?.embedding;
+    if (Array.isArray(emb) && emb.length > 0) {
+      if (!c.accumulated_embedding) {
+        c.accumulated_embedding = new Float32Array(emb.length);
+      }
+      c.embedding_count += 1;
+      const n = c.embedding_count;
+      for (let i = 0; i < emb.length; i++) {
+        c.accumulated_embedding[i] += (emb[i] - c.accumulated_embedding[i]) / n;
+      }
+    }
+
+    // Welford variance on signal strength for coherence score.
+    c.coh_n += 1;
+    const dCoh = strength - c.coh_mean;
+    c.coh_mean += dCoh / c.coh_n;
+    c.coh_m2   += dCoh * (strength - c.coh_mean);
+    const variance = c.coh_n > 1 ? c.coh_m2 / (c.coh_n - 1) : 0;
+    c.coherence_score = 1 / (1 + variance);
+
     M.candidates.set(target, c);
+
+    // Integral threshold crossing (spec §1.2, §3.1) — emit an INS so this
+    // candidate crystallises into a first-class entity. Fold the INS locally
+    // so downstream processing observes the promotion in the same tick.
+    if (c.integral_value >= COREF_CONFIG.ins_threshold && c.nul_state === 'unknown') {
+      c.nul_state = 'active';
+      const displayName = c.normalized || (sf || target);
+      const insEntry = makeEntryLocal('INS', target, 'entity-registry', {
+        kind: 'integral_threshold_crossing',
+        display_name: displayName,
+        integral_at_ins: c.integral_value,
+        coherence_at_ins: c.coherence_score,
+        sig_count_at_ins: c.sig_count,
+        candidate_id: target,
+        nul_state_prior: 'unknown',
+      }, {
+        source: 'mechanical:integral_fold',
+        sig_count: c.sig_count,
+        doc_anchor: entry.provenance?.doc_anchor,
+        confidence: Math.min(0.6 + c.sig_count * 0.02, 0.95),
+      });
+      // Record the candidate-id → anchor mapping (identity in this case, since
+      // we chose the candidate's own anchor as the permanent one).
+      M.candidateToAnchor.set(target, target);
+      fold(insEntry);
+      // Drain any CONs that were deferred waiting on this endpoint.
+      drainPendingCons();
+    }
   }
 }
 
@@ -252,9 +423,40 @@ function foldSYN(entry) {
 }
 
 function foldSEG(entry) {
-  if (entry.operand?.type === 'clause') decayAtBoundary(GRAIN.CLAUSE);
-  else if (entry.operand?.type === 'sentence') decayAtBoundary(GRAIN.SENTENCE);
-  else if (entry.operand?.type === 'paragraph') decayAtBoundary(GRAIN.PARAGRAPH);
+  const kind = entry.operand?.kind;
+  // Bifurcation SEG (spec §2.4) — split one integral into two anchors.
+  if (kind === 'entity_bifurcation') {
+    const orig = entry.operand.original_anchor;
+    const ent  = orig ? M.entities.get(orig) : null;
+    if (ent) {
+      ent.bifurcation_resolved = true;
+      ent.bifurcation_flag = false;
+      ent.split_into = [entry.operand.new_anchor_a, entry.operand.new_anchor_b];
+    }
+    return;
+  }
+  const g = grainForBoundary(entry.operand?.type);
+  if (g < 0) return;
+  const before = countAboveWorkingSet(g);
+  decayAtBoundary(g);
+  const after  = countAboveWorkingSet(g);
+  // Attach working-set stats inline on the operand (no new log entry — this is
+  // the same SEG; stats are diagnostic so the inspector can render them).
+  if (entry.operand) {
+    entry.operand.entities_above_ws = before;
+    entry.operand.entities_retained = after;
+  }
+}
+
+function countAboveWorkingSet(grain) {
+  const theta = COREF_CONFIG.working_set;
+  let n = 0;
+  for (const ent of M.entities.values()) {
+    const gv = ent.grain_values;
+    const iv = gv ? gv[grain] ?? ent.integral_value : ent.integral_value;
+    if ((iv || 0) >= theta) n++;
+  }
+  return n;
 }
 
 function foldNUL(entry) {
@@ -297,45 +499,134 @@ function updatePressure(anchorId) {
 
 // ── Integral-fold coreference queues ──────────────────────────
 
-const GRAIN = { CLAUSE: 0, SENTENCE: 1, PARAGRAPH: 2, DOCUMENT: 3 };
-const DECAY = [1.0, 0.8, 0.4, 0.05];
-const grainQueues = [[], [], [], []];
+// Five grains cover the boundary types named in the spec (§2.2).
+// TOKEN grain is collapsed into CLAUSE for now — emitters only produce clause
+// SEGs and narrower SIGs, so adding a token queue would store no useful state.
+const GRAIN = { CLAUSE: 0, SENTENCE: 1, PARAGRAPH: 2, SECTION: 3, DOCUMENT: 4 };
+// Multipliers applied when a SEG boundary fires at that grain. Used only as a
+// fallback; COREF_CONFIG.decay drives the actual decay computation below.
+const DECAY = [0.80, 0.55, 0.36, 0.29, 0.10];
+const grainQueues = [[], [], [], [], []];
+
+function grainForBoundary(type) {
+  switch (type) {
+    case 'clause':    return GRAIN.CLAUSE;
+    case 'sentence':  return GRAIN.SENTENCE;
+    case 'paragraph': return GRAIN.PARAGRAPH;
+    case 'section':   return GRAIN.SECTION;
+    case 'document':  return GRAIN.DOCUMENT;
+    default:          return -1;
+  }
+}
+
+function decayMultiplierForGrain(grain) {
+  const cfg = COREF_CONFIG.decay;
+  switch (grain) {
+    case GRAIN.CLAUSE:    return cfg.clause;
+    case GRAIN.SENTENCE:  return cfg.sentence;
+    case GRAIN.PARAGRAPH: return cfg.paragraph;
+    case GRAIN.SECTION:   return cfg.section;
+    case GRAIN.DOCUMENT:  return cfg.document;
+    default:              return DECAY[grain] ?? 0.5;
+  }
+}
 
 function pushToQueues(anchorId, position) {
-  for (let g = 0; g < 4; g++) {
+  for (let g = 0; g < grainQueues.length; g++) {
     grainQueues[g].push({ anchor: anchorId, weight: 1.0, position });
   }
 }
 
+function ensureGrainValues(rec) {
+  if (!rec.grain_values) {
+    rec.grain_values = new Array(grainQueues.length).fill(rec.integral_value || 0);
+  } else if (rec.grain_values.length < grainQueues.length) {
+    // Older records persisted with 4 grains; pad to include SECTION.
+    const last = rec.grain_values[rec.grain_values.length - 1] || 0;
+    while (rec.grain_values.length < grainQueues.length) rec.grain_values.push(last);
+  }
+  return rec.grain_values;
+}
+
 function decayAtBoundary(grainLevel) {
-  // Decay grain-queue weights.
+  if (grainLevel < 0) return;
+  // Decay grain-queue weights at and below this boundary.
   for (let g = 0; g <= grainLevel; g++) {
+    const mult = decayMultiplierForGrain(g);
     grainQueues[g] = grainQueues[g]
-      .map(e => ({ ...e, weight: e.weight * DECAY[g] }))
+      .map(e => ({ ...e, weight: e.weight * mult }))
       .filter(e => e.weight > 0.02);
   }
   // Decay per-entity grain integrals up to and including this grain.
-  // Paragraph SEG → higher λ_e; document SEG → near-zero except prominent.
+  // Paragraph SEG → higher λ_e; section/document SEG → near-zero except prominent.
   for (const ent of M.entities.values()) {
-    if (!ent.grain_values) continue;
+    const grain_values = ensureGrainValues(ent);
     for (let g = 0; g <= grainLevel; g++) {
-      ent.grain_values[g] *= DECAY[g];
+      grain_values[g] *= decayMultiplierForGrain(g);
     }
     // Top-level integral tracks the coarsest active grain.
-    ent.integral_value = ent.grain_values[grainLevel];
+    ent.integral_value = grain_values[grainLevel];
     // Mark cleared if we've decayed below working-set after INS.
-    if (ent.integral_value < 0.05 && ent.ops?.includes('INS')) {
+    if (ent.integral_value < 0.05 && ent.ops?.includes('INS') && !ent.cleared) {
       ent.cleared = true;
+      ent.nul_state = 'cleared';
     }
   }
   // Decay pre-INS candidates too — evidence that never crossed threshold
   // fades and eventually drops out of the working set.
   if (M.candidates) {
+    const mult = decayMultiplierForGrain(grainLevel);
     for (const [k, c] of M.candidates) {
-      c.integral_value *= DECAY[grainLevel];
+      c.integral_value *= mult;
+      const gv = ensureGrainValues(c);
+      for (let g = 0; g <= grainLevel; g++) gv[g] *= decayMultiplierForGrain(g);
       if (c.integral_value < 0.05) M.candidates.delete(k);
     }
   }
+}
+
+// Replay CONs that were deferred because one endpoint was still a candidate.
+// Called whenever an INS promotion occurs (spec §5.2).
+function drainPendingCons() {
+  if (!M.pendingCons.length) return;
+  const stillPending = [];
+  for (const con of M.pendingCons) {
+    const s = con.target;
+    const o = con.operand?.object_anchor;
+    if (s && o && M.entities.has(s) && M.entities.has(o)) {
+      // Clear the retry guard so foldCON processes it on the merge-edge path.
+      con.operand.__deferred_retry = false;
+      fold(con, false);
+    } else {
+      stillPending.push(con);
+    }
+  }
+  M.pendingCons = stillPending;
+}
+
+// Focus-driven SIG (spec §6) — a reading-session signal produced by the
+// explorer UI. Updates the entity's integral live so the inspector reflects
+// the user's current attention. Unlike mechanical SIGs, focus events always
+// target an anchor that is already (or about to be) in M.
+function handleFocusSig(payload) {
+  const { anchor: a, strength: kind, embedding, doc_anchor } = payload || {};
+  if (!a) return { ok: false, error: 'missing anchor' };
+  const sigma = COREF_CONFIG.focus_strength[kind] ?? COREF_CONFIG.focus_strength.hover;
+  const sigEntry = makeEntryLocal('SIG',
+    anchorLocal(`focus:${kind}:${a}:${Date.now()}`),
+    a, {
+      text: kind,
+      normalized: a,
+      detector: kind === 'dwell' ? 'FOCUS' : 'NP',
+      focus_kind: kind,
+      embedding: Array.isArray(embedding) ? embedding : undefined,
+    }, {
+      source: `focus:${kind}`,
+      doc_anchor,
+      confidence: sigma,
+    });
+  fold(sigEntry);
+  return { ok: true, strength: sigma };
 }
 
 function resolveCoref(payload) {
@@ -612,6 +903,54 @@ self.onmessage = async (e) => {
       self.postMessage({ id, result: { entities: out, candidates } });
     } else if (op === 'resolve_coreference') {
       self.postMessage({ id, result: resolveCoref(payload) });
+    } else if (op === 'focus_sig' || op === 'FOCUS_SIG') {
+      // Reading-session focus event from the main thread (spec §6).
+      const r = handleFocusSig(payload);
+      self.postMessage({ id, result: r });
+    } else if (op === 'get_working_set' || op === 'GET_WORKING_SET') {
+      const grain = typeof payload?.grain === 'number'
+        ? payload.grain
+        : grainForBoundary(payload?.grain);
+      const theta = COREF_CONFIG.working_set;
+      const out = [];
+      for (const [a, ent] of M.entities) {
+        const iv = (ent.grain_values?.[grain] ?? ent.integral_value ?? 0);
+        if (iv >= theta) {
+          out.push({
+            anchor: a,
+            integral_value: iv,
+            display_name: M.displayNames.get(a) || a,
+            coherence_score: ent.coherence_score,
+            last_mention_position: ent.last_mention_position,
+          });
+        }
+      }
+      out.sort((x, y) => y.integral_value - x.integral_value);
+      self.postMessage({ id, result: { grain, entities: out } });
+    } else if (op === 'get_candidate_count' || op === 'GET_CANDIDATE_COUNT') {
+      let above = 0;
+      const theta = COREF_CONFIG.ins_threshold;
+      const cands = M.candidates || new Map();
+      for (const c of cands.values()) if ((c.integral_value || 0) >= theta) above++;
+      self.postMessage({ id, result: {
+        count: cands.size,
+        above_ins_threshold: above,
+        pending_cons: M.pendingCons.length,
+      }});
+    } else if (op === 'coref_config') {
+      // Read or update thresholds at runtime (settings panel hook).
+      if (payload && typeof payload === 'object') {
+        for (const k of Object.keys(payload)) {
+          if (k === 'decay' && payload.decay) {
+            Object.assign(COREF_CONFIG.decay, payload.decay);
+          } else if (k === 'focus_strength' && payload.focus_strength) {
+            Object.assign(COREF_CONFIG.focus_strength, payload.focus_strength);
+          } else if (k in COREF_CONFIG) {
+            COREF_CONFIG[k] = payload[k];
+          }
+        }
+      }
+      self.postMessage({ id, result: { ...COREF_CONFIG } });
     } else if (op === 'flush') {
       await flushDelta();
       self.postMessage({ id, result: 'flushed' });
