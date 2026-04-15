@@ -1150,6 +1150,65 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
   color: var(--text); font-style: italic;
 }
 
+/* ── Fluent-answer (optional GPT layer) ── */
+.q-fluent-config {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+  background: var(--bg); font-size: 10px; color: var(--muted);
+  font-family: 'JetBrains Mono', monospace;
+}
+.q-fluent-config input[type=text],
+.q-fluent-config input[type=password],
+.q-fluent-config select {
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); font-family: inherit;
+  font-size: 10px; padding: 3px 5px;
+}
+.q-fluent-config input[type=password] { flex: 1; min-width: 160px; }
+.q-fluent-config label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.q-fluent-config .qfc-summary { cursor: pointer; color: var(--def); user-select: none; }
+.q-fluent-config .qfc-summary:hover { color: var(--sig); }
+.q-fluent-config.collapsed > :not(.qfc-summary):not(.qfc-status) { display: none; }
+.q-fluent-config .qfc-status { margin-left: auto; color: var(--muted); }
+.q-fluent-config .qfc-status.ok { color: var(--ins); }
+.q-fluent-config .qfc-status.warn { color: var(--nul); }
+
+.q-fluent {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--def);
+  background: var(--surface);
+  line-height: 1.6; font-size: 13px; color: var(--bright);
+}
+.q-fluent .qf-head {
+  font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--def); margin-bottom: 6px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.q-fluent .qf-prose { white-space: pre-wrap; }
+.q-fluent .qf-prose a.qf-e,
+.q-fluent .qf-prose a.qf-l {
+  color: var(--text); text-decoration: none;
+  border-bottom: 1px dotted var(--sig); cursor: pointer;
+}
+.q-fluent .qf-prose a.qf-e { border-bottom-color: var(--def); }
+.q-fluent .qf-prose a.qf-l { border-bottom-color: var(--sig); }
+.q-fluent .qf-prose a:hover { background: rgba(34,211,238,0.08); }
+.q-fluent .qf-cite {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px;
+  color: var(--muted); margin-left: 3px; cursor: pointer;
+  border-bottom: none;
+}
+.q-fluent .qf-cite:hover { color: var(--sig); }
+.q-fluent .qf-foot {
+  font-size: 10px; color: var(--muted); margin-top: 8px;
+  padding-top: 6px; border-top: 1px dotted var(--border);
+  font-family: 'JetBrains Mono', monospace;
+}
+.q-fluent .qf-foot em { color: var(--text); font-style: normal; }
+.q-fluent.qf-warn { border-color: var(--nul); }
+.q-fluent.qf-warn .qf-head { color: var(--nul); }
+
 /* ── Pressure dots on cast cards ── */
 .dc-dot {
   display: inline-block;
@@ -1445,26 +1504,6 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
     <span id="classifier-status" style="font-size:11px;color:var(--muted);margin-left:10px;">
       Loading classifier…
     </span>
-    <button id="classifier-bake" onclick="bakeCentroidsUI()"
-            style="display:none;margin-left:6px;font-size:11px;padding:3px 8px;
-                   background:var(--surface);border:1px solid var(--border2);
-                   color:var(--sig);cursor:pointer;border-radius:3px;">
-      ⚙ Bake centroids
-    </button>
-    <button id="classifier-download" onclick="downloadCentroidsJSON()"
-            title="Save baked centroids.json — commit to nl/ in the repo so future visitors don't need to bake"
-            style="display:none;margin-left:6px;font-size:11px;padding:3px 8px;
-                   background:var(--surface);border:1px solid var(--border2);
-                   color:var(--text);cursor:pointer;border-radius:3px;">
-      ↓ centroids.json
-    </button>
-    <button id="classifier-reset" onclick="resetCentroidsUI()"
-            title="Delete OPFS-cached centroids and re-bake"
-            style="margin-left:6px;font-size:11px;padding:3px 8px;
-                   background:var(--surface);border:1px solid var(--border2);
-                   color:var(--muted);cursor:pointer;border-radius:3px;">
-      ↻
-    </button>
   </header>
 
   <div class="body">
@@ -1474,7 +1513,6 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
       <div class="panel-header">
         <span class="ph-label">Document</span>
         <div class="panel-actions">
-          <span id="worker-indicator" class="worker-ind worker-off" title="OPFS worker bridge status">● OPFS</span>
           <div class="grain-toggle" role="group" aria-label="Rendering grain">
             <button class="grain-btn grain-zoom" data-grain-act="out" onclick="zoomOut()" title="Zoom out (−)">−</button>
             <button class="grain-btn" data-grain="token" onclick="setRenderGrain('token')" title="Token grain (1)">Tok</button>
@@ -1506,17 +1544,6 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
            each ingest. Filtered entity count uses `isDisplayableEntity`. -->
       <div class="corpus-header" id="corpus-header" style="display:none;"></div>
 
-      <!-- EVA calibration notice strip — surfaces when flat-rate
-           (confidence_gap < 0.08) exceeds 50% across classified
-           clauses. Auto-dismisses when flat-rate drops below 30%. -->
-      <div class="eva-notice" id="eva-notice" style="display:none;"></div>
-
-      <!-- Live operator ticker — fold-worker emits fold_event for
-           INS/DEF/EVA/REC and the main thread maintains a 20-entry
-           ring buffer here. Lines fade after ~4s; scrollable on
-           hover so a reader can pause and catch up. -->
-      <div class="op-ticker" id="op-ticker" style="display:none;"></div>
-
       <div class="doc-area" id="doc-area">
         <div class="drop-zone visible" id="drop-zone" onclick="document.getElementById('file-input').click()">
           <div class="drop-zone-icon">⬇</div>
@@ -1539,17 +1566,8 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
     <div class="panel-right">
       <div class="right-tabs">
         <div class="right-tab active" id="tab-log" onclick="switchRightTab('log')">LOG <span id="log-count" style="font-size:10px;opacity:0.6"></span></div>
-        <div class="right-tab" id="tab-pressure" onclick="switchRightTab('pressure')">PRESSURE MAP <span id="pressure-count" style="font-size:10px;opacity:0.6"></span></div>
         <div class="right-tab" id="tab-digest" onclick="switchRightTab('digest')">DIGEST <span id="digest-count" style="font-size:10px;opacity:0.6"></span></div>
         <div class="right-tab" id="tab-query" onclick="switchRightTab('query')">QUERY</div>
-      </div>
-
-      <div class="gradient-legend" id="gradient-legend" style="display:none">
-        <div class="gl-dot" style="background:var(--nul)"></div><span>critical</span>
-        <div class="gl-dot" style="background:var(--sig)"></div><span>warning</span>
-        <div class="gl-dot" style="background:var(--ins)"></div><span>stable</span>
-        <div class="gl-dot" style="background:var(--border2)"></div><span>thin</span>
-        <span style="margin-left:auto;color:var(--bright)">EVA pressure · z-score</span>
       </div>
 
       <!-- Operator triad grid: 3 rows × 3 cols = 9 operators.
@@ -1621,8 +1639,6 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
         </div>
       </div>
 
-      <div class="pressure-map" id="pressure-map"><div class="pressure-empty"><div class="empty-glyph" style="font-size:24px;opacity:0.3">⊨</div><div>Process documents to see pressure map</div></div></div>
-
       <!-- DIGEST: deterministic, provenance-linked summary. Every bullet
            carries the log_id(s) it was assembled from. -->
       <div class="digest-panel" id="digest-panel">
@@ -1651,6 +1667,38 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
                  placeholder='Ask: "what is X?" · "what did X say?" · "how is X related to Y?" · "the quiet parts"'
                  onkeydown="if(event.key==='Enter')runQuery()">
           <button class="dbtn" onclick="runQuery()">Ask</button>
+        </div>
+
+        <!-- Optional GPT fluent-answer layer. The LLM only composes prose
+             from the mechanical retrieval's catalog (entity names + cited
+             clauses). Any claim in the output that doesn't resolve to a
+             catalog entry is stripped post-hoc — the LLM cannot introduce
+             facts, only phrasing. -->
+        <div class="q-fluent-config collapsed" id="q-fluent-config">
+          <span class="qfc-summary" onclick="toggleFluentConfig()">
+            ⊕ Fluent answer (optional GPT)
+          </span>
+          <label>
+            <input type="checkbox" id="qfc-enable" onchange="saveFluentConfig()">
+            enable
+          </label>
+          <input type="password" id="qfc-key" placeholder="sk-…"
+                 autocomplete="off" spellcheck="false"
+                 oninput="saveFluentConfig()">
+          <select id="qfc-model" onchange="saveFluentConfig()">
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
+            <option value="gpt-4o">gpt-4o</option>
+            <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+            <option value="gpt-4.1">gpt-4.1</option>
+          </select>
+          <input type="text" id="qfc-base" placeholder="https://api.openai.com/v1"
+                 style="width:180px"
+                 oninput="saveFluentConfig()">
+          <label title="Don't persist API key to localStorage; keep only in memory for this tab">
+            <input type="checkbox" id="qfc-session" onchange="saveFluentConfig()">
+            session only
+          </label>
+          <span class="qfc-status" id="qfc-status"></span>
         </div>
         <div class="query-body" id="query-body">
           <div class="digest-empty">
@@ -5984,10 +6032,7 @@ function renderAll() {
   try { renderCorpusHeader(); } catch {}
   try { renderEVANotice(); } catch {}
   document.getElementById('btn-download').style.display = 'inline';
-  // If pressure tab is visible, refresh it
-  if (document.getElementById('pressure-map').classList.contains('visible')) {
-    renderPressureMap();
-  }
+  // Pressure-map tab pruned — no-op.
   // Auto-refresh digest so its entity count + gist stay current in the tab
   // header. Only runs when the digest panel is visible to avoid unnecessary
   // work on every ingest.
@@ -7296,13 +7341,8 @@ function paintLogPressure(scores) {
 
 function switchRightTab(tab) {
   const logList    = document.getElementById('log-list');
-  // The flat filter-bar was replaced with the triad grid — keep the same
-  // show/hide behaviour so pressure-map view stays uncluttered.
   const triadGrid  = document.getElementById('op-triad-grid');
-  const pressMap   = document.getElementById('pressure-map');
-  const legend     = document.getElementById('gradient-legend');
   const tabLog     = document.getElementById('tab-log');
-  const tabPres    = document.getElementById('tab-pressure');
   const tabDigest  = document.getElementById('tab-digest');
   const tabQuery   = document.getElementById('tab-query');
   const digestPan  = document.getElementById('digest-panel');
@@ -7311,21 +7351,14 @@ function switchRightTab(tab) {
   // Default: hide everything, then enable the selected view.
   logList.classList.add('hidden');
   if (triadGrid) triadGrid.style.display = 'none';
-  pressMap.classList.remove('visible');
-  legend.style.display = 'none';
   if (digestPan) digestPan.classList.remove('visible');
   if (queryPan)  queryPan.classList.remove('visible');
-  [tabLog, tabPres, tabDigest, tabQuery].forEach(t => t && t.classList.remove('active'));
+  [tabLog, tabDigest, tabQuery].forEach(t => t && t.classList.remove('active'));
 
   if (tab === 'log') {
     logList.classList.remove('hidden');
     if (triadGrid) triadGrid.style.display = '';
     tabLog.classList.add('active');
-  } else if (tab === 'pressure') {
-    pressMap.classList.add('visible');
-    legend.style.display = 'flex';
-    tabPres.classList.add('active');
-    renderPressureMap();
   } else if (tab === 'digest') {
     if (digestPan) digestPan.classList.add('visible');
     if (tabDigest) tabDigest.classList.add('active');
@@ -7735,6 +7768,20 @@ async function runQuery() {
     // Light up every supporting clause in the document itself — the doc
     // becomes the result surface, not a side list.
     highlightLogIds((result.supporting || []).map(s => s.log_id));
+
+    // Optional: hand the mechanical result to a GPT model to compose
+    // a fluent, citation-anchored paraphrase. The LLM never sees the
+    // raw corpus; it only sees the retrieval catalog and must cite.
+    const cfg = getFluentConfig();
+    if (cfg.enabled && cfg.apiKey) {
+      renderFluentPlaceholder(body);
+      try {
+        const fluent = await composeFluentAnswer(q, result, cfg);
+        injectFluentAnswer(body, fluent);
+      } catch (e) {
+        injectFluentError(body, e.message || String(e));
+      }
+    }
   } catch (err) {
     console.error('query failed', err);
     body.innerHTML = `<div class="digest-empty">Query error: ${escapeHtml(err.message || String(err))}</div>`;
@@ -7835,6 +7882,366 @@ function renderQueryBullet(b, esc) {
     return `<div>${digestHTML(b.digest)}</div>`;
   }
   return `<div style="color:var(--muted)">Unknown bullet kind: ${esc(b.kind)}</div>`;
+}
+
+
+// ═══════════════════════════════════════════════════════
+// FLUENT ANSWER — optional GPT compose over mechanical retrieval
+//
+// Design contract: the LLM is a phrasing engine, not a source of facts.
+// It receives a CATALOG — entities (anchors + display names) and
+// CITATIONS (log_id + literal clause text + doc title) — and must
+// produce prose whose every factual claim is an inline link to a
+// catalog entry. Any link whose target isn't in the catalog is
+// stripped post-hoc. Numeric tokens outside a validated link are
+// flagged. The model cannot introduce names, amounts, or dates that
+// aren't already in the mechanical result — it can only choose among
+// the ones the retrieval already cited.
+// ═══════════════════════════════════════════════════════
+
+const _FLUENT_LS_KEY   = 'nlx_fluent_key';
+const _FLUENT_LS_CFG   = 'nlx_fluent_cfg';
+const _fluentSession   = { apiKey: null };
+
+function _loadFluentConfigIntoUI() {
+  const cfgRaw = localStorage.getItem(_FLUENT_LS_CFG);
+  let cfg = {};
+  try { cfg = cfgRaw ? JSON.parse(cfgRaw) : {}; } catch { cfg = {}; }
+  const $ = (id) => document.getElementById(id);
+  if (!$('qfc-enable')) return;
+  $('qfc-enable').checked  = !!cfg.enabled;
+  $('qfc-model').value     = cfg.model || 'gpt-4o-mini';
+  $('qfc-base').value      = cfg.baseURL || 'https://api.openai.com/v1';
+  $('qfc-session').checked = !!cfg.sessionOnly;
+  $('qfc-key').value       = cfg.sessionOnly
+    ? (_fluentSession.apiKey || '')
+    : (localStorage.getItem(_FLUENT_LS_KEY) || '');
+  _renderFluentConfigStatus();
+}
+document.addEventListener('DOMContentLoaded', _loadFluentConfigIntoUI);
+
+function saveFluentConfig() {
+  const $ = (id) => document.getElementById(id);
+  const cfg = {
+    enabled:     $('qfc-enable').checked,
+    model:       $('qfc-model').value,
+    baseURL:     ($('qfc-base').value || '').trim() || 'https://api.openai.com/v1',
+    sessionOnly: $('qfc-session').checked,
+  };
+  localStorage.setItem(_FLUENT_LS_CFG, JSON.stringify(cfg));
+  const key = $('qfc-key').value;
+  if (cfg.sessionOnly) {
+    _fluentSession.apiKey = key;
+    localStorage.removeItem(_FLUENT_LS_KEY);
+  } else {
+    _fluentSession.apiKey = null;
+    if (key) localStorage.setItem(_FLUENT_LS_KEY, key);
+    else     localStorage.removeItem(_FLUENT_LS_KEY);
+  }
+  _renderFluentConfigStatus();
+}
+
+function _renderFluentConfigStatus() {
+  const status = document.getElementById('qfc-status');
+  if (!status) return;
+  const cfg = getFluentConfig();
+  if (!cfg.enabled) {
+    status.textContent = 'off'; status.className = 'qfc-status';
+  } else if (!cfg.apiKey) {
+    status.textContent = 'key required'; status.className = 'qfc-status warn';
+  } else {
+    status.textContent = `ready · ${cfg.model}`; status.className = 'qfc-status ok';
+  }
+}
+
+function toggleFluentConfig() {
+  const el = document.getElementById('q-fluent-config');
+  if (el) el.classList.toggle('collapsed');
+}
+
+function getFluentConfig() {
+  let cfg = {};
+  try { cfg = JSON.parse(localStorage.getItem(_FLUENT_LS_CFG) || '{}'); } catch {}
+  const key = cfg.sessionOnly
+    ? _fluentSession.apiKey
+    : localStorage.getItem(_FLUENT_LS_KEY);
+  return {
+    enabled:     !!cfg.enabled,
+    model:       cfg.model || 'gpt-4o-mini',
+    baseURL:     cfg.baseURL || 'https://api.openai.com/v1',
+    sessionOnly: !!cfg.sessionOnly,
+    apiKey:      key || '',
+  };
+}
+
+// ── Catalog builder ─────────────────────────────────────────────
+// Assemble the minimum facts the LLM is allowed to phrase with.
+function buildFluentCatalog(queryResult) {
+  const entities = new Map();  // anchor → { anchor, name }
+  const citations = new Map(); // log_id → { log_id, text, doc_title, cell_id }
+  const edges    = [];
+
+  const addEntity = (anchor, name) => {
+    if (!anchor || !name) return;
+    if (!entities.has(anchor)) entities.set(anchor, { anchor, name: String(name) });
+  };
+  const addCitation = (c) => {
+    if (!c || !c.log_id) return;
+    if (!citations.has(c.log_id)) citations.set(c.log_id, c);
+  };
+
+  // Plan-level entity matches (anchor + display_name pairs).
+  (queryResult.plan?.entities || []).forEach(e => addEntity(e.anchor, e.name));
+
+  // Bullets carry named subjects + edge targets.
+  for (const b of (queryResult.answer?.bullets || [])) {
+    if (b.anchor && b.subject) addEntity(b.anchor, b.subject);
+    if (b.kind === 'definition') {
+      for (const e of (b.edges_out || [])) {
+        if (e.log_id) addCitation({
+          log_id: e.log_id,
+          text: `${b.subject} ${e.predicate} ${e.object}`,
+          doc_title: null, cell_id: null,
+          kind: 'edge',
+        });
+      }
+      if (b.frame && b.frame_log_id) addCitation({
+        log_id: b.frame_log_id,
+        text: `${b.subject} — ${b.frame}`,
+        doc_title: null, cell_id: null,
+        kind: 'frame',
+      });
+    }
+    if (b.kind === 'path') {
+      for (const h of (b.hops || [])) {
+        for (const id of (h.log_ids || [])) addCitation({
+          log_id: id,
+          text: `${h.s} ${h.predicate} ${h.o}`,
+          doc_title: null, cell_id: null,
+          kind: 'edge',
+        });
+      }
+    }
+    for (const id of (b.log_ids || [])) {
+      if (!citations.has(id)) addCitation({
+        log_id: id, text: `(${b.kind}) ${b.subject || ''}`,
+        doc_title: null, cell_id: null, kind: b.kind,
+      });
+    }
+  }
+
+  // Supporting clauses — the richest source: full span text with provenance.
+  for (const s of (queryResult.supporting || [])) {
+    addCitation({
+      log_id: s.log_id,
+      text: (s.span?.text || '').trim(),
+      doc_title: s.span?.doc_title || null,
+      cell_id: s.cell_id || null,
+      confidence: s.confidence,
+      agreement: s.agreement,
+      kind: 'clause',
+    });
+  }
+
+  return {
+    entities: Array.from(entities.values()),
+    citations: Array.from(citations.values()),
+    edges,
+  };
+}
+
+// ── Prompt assembly ─────────────────────────────────────────────
+function _fluentSystemPrompt() {
+  return [
+    'You are a fluency layer over a grounded retrieval system. You do not introduce facts; you only rephrase what the retrieval already found.',
+    '',
+    'You will be given a user QUESTION and a CATALOG with two sections:',
+    '  ENTITIES — each has an "anchor" id and a canonical "name".',
+    '  CITATIONS — each has a "log_id" and the literal clause "text" plus optional "doc_title".',
+    '',
+    'OUTPUT CONTRACT (violations are automatically stripped):',
+    '  1. Write 1–3 short paragraphs of readable prose that answer the question.',
+    '  2. Every named entity you mention (organization, person, place, document) must be written as a Markdown link of the form:  [surface text](entity:ANCHOR)  — and ANCHOR must come from the CATALOG.',
+    '  3. Every factual claim (who did what, when, for how much) must be followed by at least one citation of the form:  [log_id](log:LOG_ID)  — where LOG_ID comes from the CATALOG and supports that exact claim.',
+    '  4. Do NOT invent names, numbers, dates, amounts, or actions that are not already present in the CATALOG.',
+    '  5. If the CATALOG is insufficient to answer, say so in one sentence and stop.',
+    '  6. No headers, no bullet lists, no code fences. Plain prose with inline links only.',
+    '',
+    'You are a phrasing engine. Treat the catalog as the only source of truth.',
+  ].join('\n');
+}
+
+function _fluentUserPrompt(question, catalog) {
+  const ents = catalog.entities
+    .map(e => `- anchor=${e.anchor} name=${JSON.stringify(e.name)}`)
+    .join('\n') || '(none)';
+  const cites = catalog.citations
+    .map(c => {
+      const meta = [
+        c.doc_title ? `doc=${JSON.stringify(c.doc_title)}` : null,
+        c.cell_id   ? `cell=${c.cell_id}` : null,
+      ].filter(Boolean).join(' ');
+      const body = (c.text || '').replace(/\s+/g, ' ').slice(0, 320);
+      return `- log_id=${c.log_id} ${meta}\n    text=${JSON.stringify(body)}`;
+    }).join('\n') || '(none)';
+  return [
+    `QUESTION: ${question}`,
+    '',
+    'CATALOG:',
+    'ENTITIES:',
+    ents,
+    '',
+    'CITATIONS:',
+    cites,
+    '',
+    'Write the grounded answer now. Remember: every name is [text](entity:ANCHOR) and every claim ends with [log_id](log:LOG_ID). Only use anchors and log_ids that appear above.',
+  ].join('\n');
+}
+
+// ── Validator: strip links with unknown refs, flag ungrounded numerics ──
+function validateFluentProse(raw, catalog) {
+  const anchorSet = new Set(catalog.entities.map(e => e.anchor));
+  const logSet    = new Set(catalog.citations.map(c => c.log_id));
+  let stripped = 0, kept = 0, rewrites = 0;
+
+  // 1) Rewrite Markdown links. Keep only entity:/log: links whose target resolves.
+  const LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/g;
+  const prose = raw.replace(LINK_RE, (_m, text, href) => {
+    const m = /^(entity|log):(.+)$/.exec(href.trim());
+    if (!m) { stripped++; return text; }
+    const kind = m[1], ref = m[2].trim();
+    if (kind === 'entity') {
+      if (!anchorSet.has(ref)) { stripped++; return text; }
+      kept++;
+      return `§§E§§${ref}§§${text}§§`;
+    } else {
+      if (!logSet.has(ref)) { stripped++; return text; }
+      kept++;
+      return `§§L§§${ref}§§${text}§§`;
+    }
+  });
+
+  // 2) Flag numeric/currency/date-ish tokens that sit outside any validated
+  //    citation neighborhood. Heuristic: a claim with a money or year value
+  //    must have a log: citation within the same sentence.
+  const sentences = prose.split(/(?<=[.!?])\s+/);
+  const warnings = [];
+  const NUM_RE = /(\$\s?\d[\d,\.]*\s?(million|billion|thousand|k|m|b)?|\b(19|20)\d{2}\b|\b\d{1,3}(?:,\d{3})+\b|\b\d+\.\d+\b)/i;
+  for (const s of sentences) {
+    if (NUM_RE.test(s) && !/§§L§§/.test(s)) {
+      warnings.push(s.replace(/§§[EL]§§[^§]+§§([^§]+)§§/g, '$1').trim().slice(0, 200));
+    }
+  }
+
+  return { prose, kept, stripped, warnings };
+}
+
+// Turn the sentinel-tagged prose into sanitized HTML with clickable links.
+function _fluentProseToHTML(validated) {
+  const escaped = escapeHtml(validated.prose);
+  return escaped
+    .replace(/§§E§§([^§]+)§§([^§]+)§§/g, (_m, anchor, text) =>
+      `<a class="qf-e" onclick="jumpToAnchor('${anchor.replace(/'/g,"\\'")}')">${text}</a>`)
+    .replace(/§§L§§([^§]+)§§([^§]+)§§/g, (_m, logId, text) =>
+      `<a class="qf-l" onclick="jumpToLogId('${logId.replace(/'/g,"\\'")}')">${text}</a>` +
+      `<span class="qf-cite" onclick="jumpToLogId('${logId.replace(/'/g,"\\'")}')">#${escapeHtml(logId)}</span>`)
+    .replace(/\n\n+/g, '</p><p>')
+    .replace(/\n/g, '<br>');
+}
+
+// Fallback entity jump: if the anchor has a log_id of an INS event, use it.
+function jumpToAnchor(anchor) {
+  if (!state.combined) return;
+  const ins = state.combined.entries().find(e =>
+    (e.op === 'INS' || e.op === 'DEF') && e.anchor === anchor);
+  if (ins?.log_id) jumpToLogId(ins.log_id);
+  else highlightLogIds([]);
+}
+
+// ── Network call ────────────────────────────────────────────────
+async function composeFluentAnswer(question, queryResult, cfg) {
+  const catalog = buildFluentCatalog(queryResult);
+  if (!catalog.citations.length && !catalog.entities.length) {
+    return {
+      html: '<em>No catalog facts available for a grounded paraphrase.</em>',
+      kept: 0, stripped: 0, warnings: [],
+      model: cfg.model, skipped: true,
+    };
+  }
+
+  const body = {
+    model: cfg.model,
+    temperature: 0.2,
+    messages: [
+      { role: 'system', content: _fluentSystemPrompt() },
+      { role: 'user',   content: _fluentUserPrompt(question, catalog) },
+    ],
+  };
+  const url = cfg.baseURL.replace(/\/+$/, '') + '/chat/completions';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + cfg.apiKey,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`LLM HTTP ${res.status}: ${txt.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  const raw  = data?.choices?.[0]?.message?.content || '';
+  const validated = validateFluentProse(raw, catalog);
+  return {
+    html: _fluentProseToHTML(validated),
+    kept: validated.kept,
+    stripped: validated.stripped,
+    warnings: validated.warnings,
+    model: cfg.model,
+    skipped: false,
+  };
+}
+
+// ── Renderers ───────────────────────────────────────────────────
+function renderFluentPlaceholder(body) {
+  const host = document.createElement('div');
+  host.className = 'q-fluent';
+  host.id = 'q-fluent-host';
+  host.innerHTML = `<div class="qf-head">Fluent answer · composing…</div>
+    <div class="qf-prose" style="color:var(--muted)">Asking model for a grounded paraphrase…</div>`;
+  body.insertBefore(host, body.firstChild);
+}
+function injectFluentAnswer(body, fluent) {
+  const host = document.getElementById('q-fluent-host') || (() => {
+    const h = document.createElement('div');
+    h.className = 'q-fluent'; h.id = 'q-fluent-host';
+    body.insertBefore(h, body.firstChild); return h;
+  })();
+  const warnBlock = fluent.warnings?.length
+    ? `<div class="qf-foot" style="color:var(--nul)">⚠ ${fluent.warnings.length} sentence(s) contain numeric claims without a log citation — treat with suspicion.</div>`
+    : '';
+  host.innerHTML = `
+    <div class="qf-head">Fluent answer · ${escapeHtml(fluent.model)}${fluent.skipped ? ' · skipped' : ''}</div>
+    <div class="qf-prose"><p>${fluent.html}</p></div>
+    <div class="qf-foot">
+      <em>${fluent.kept}</em> citations kept ·
+      <em>${fluent.stripped}</em> unresolved links stripped ·
+      the model cannot introduce facts — only phrase retrieved ones
+    </div>
+    ${warnBlock}
+  `;
+}
+function injectFluentError(body, msg) {
+  const host = document.getElementById('q-fluent-host') || (() => {
+    const h = document.createElement('div');
+    h.className = 'q-fluent qf-warn'; h.id = 'q-fluent-host';
+    body.insertBefore(h, body.firstChild); return h;
+  })();
+  host.classList.add('qf-warn');
+  host.innerHTML = `<div class="qf-head">Fluent answer · error</div>
+    <div class="qf-prose" style="color:var(--muted)">${escapeHtml(msg)}</div>
+    <div class="qf-foot">Mechanical retrieval below is unaffected.</div>`;
 }
 
 
