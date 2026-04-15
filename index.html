@@ -4734,18 +4734,39 @@ async function _ingestInner(text, title, source, log) {
       );
     } catch {}
   }
-  stageCON_cooccurrence(log, sentences, entityAnchors, da, candidateAnchors);
-  const _conAfter = log.byOp('CON').length;
-  const _conEdges = log.byOp('CON');
-  const _predEdges = _conEdges.filter(c => typeof hasPredicate === 'function' ? hasPredicate(c) : false).length;
-  setStage(`CON · ${_predEdges} predicate edges · ${(_conAfter - _conBefore) - _predEdges} co-occurrences`);
-  try {
-    const llmQueue = stageSPO(log, sentences, entityAnchors, da);
-    // Stash the LLM queue on the log for optional later processing. The
-    // LLM pass is opt-in (rate-limit + key concerns) — see stageSPO_llm.
-    log._llmQueue = llmQueue;
-  } catch (err) {
-    console.warn('stageSPO (heuristic) failed:', err);
+  // ── Proposition-reading pipeline (rewrite-plan §13) ──
+  // When `window.EO_PROPOSITION_READING` is set, Resolution-face
+  // stance classification gates extraction: Binding clauses get full
+  // SPO + modifier work, other stances emit minimal typed CONs.
+  // The legacy stageCON_cooccurrence path is preserved as fallback.
+  if (isPropositionReadingEnabled()) {
+    const classifications = log._clauseClassifications || null; // populated by stageEmbeddingClassify_stance (future wiring)
+    const { stats: _stanceStats, bindingQueue } =
+      stageCON_typed(log, sentences, entityAnchors, da, classifications);
+    const summary = Object.entries(_stanceStats)
+      .filter(([, v]) => v)
+      .map(([k, v]) => `${k}:${v}`).join(' · ');
+    setStage(`CON(typed) · ${summary || 'no stance emissions'}`);
+    try {
+      const llmQueue = stageSPO_from_binding(log, bindingQueue, entityAnchors, da);
+      log._llmQueue = llmQueue;
+    } catch (err) {
+      console.warn('stageSPO_from_binding failed:', err);
+    }
+  } else {
+    stageCON_cooccurrence(log, sentences, entityAnchors, da, candidateAnchors);
+    const _conAfter = log.byOp('CON').length;
+    const _conEdges = log.byOp('CON');
+    const _predEdges = _conEdges.filter(c => typeof hasPredicate === 'function' ? hasPredicate(c) : false).length;
+    setStage(`CON · ${_predEdges} predicate edges · ${(_conAfter - _conBefore) - _predEdges} co-occurrences`);
+    try {
+      const llmQueue = stageSPO(log, sentences, entityAnchors, da);
+      // Stash the LLM queue on the log for optional later processing. The
+      // LLM pass is opt-in (rate-limit + key concerns) — see stageSPO_llm.
+      log._llmQueue = llmQueue;
+    } catch (err) {
+      console.warn('stageSPO (heuristic) failed:', err);
+    }
   }
   await yieldTick();
 
@@ -4768,6 +4789,18 @@ async function _ingestInner(text, title, source, log) {
       console.warn('crystallize_frames failed; falling back to snapshot:', err);
       stageFrameDEF(log, entityAnchors, da);
     }
+    // Per-slot predicate-class DEF crystallization (rewrite-plan §3).
+    // Runs only when proposition reading is enabled — without typed
+    // Binding CONs there are no predicate slots to crystallize.
+    if (isPropositionReadingEnabled()) {
+      try {
+        const r = await workerRequest(workerBridge.foldWorker,
+          'crystallize_slots', { doc_anchor: da });
+        if (r?.emitted) setStage(`DEF · slots · ${r.emitted} crystallized`);
+      } catch (err) {
+        console.warn('crystallize_slots failed:', err);
+      }
+    }
   } else {
     stageFrameDEF(log, entityAnchors, da);
   }
@@ -4784,8 +4817,25 @@ async function _ingestInner(text, title, source, log) {
   stageEVA_temporal(log, text, da);
   await yieldTick();
 
+  // 10b. EVA (proposition) — rewrite-plan §7. Runs when proposition
+  // reading is enabled; otherwise the flat keyword/temporal path below
+  // is the only EVA emission at ingest time.
+  if (isPropositionReadingEnabled()) {
+    try {
+      const r = await stageEVA_proposition(log, da);
+      if (r?.tested) setStage(`EVA · proposition · ${r.tested} tested`);
+    } catch (err) { console.warn('stageEVA_proposition failed:', err); }
+  }
+
   // 11. NUL — absence signals (regex + structural integral state)
   setStage('NUL · absence');
+  // 11a. Structural-NUL aggregation (rewrite-plan §8) runs first when
+  // proposition reading is on; the legacy keyword stage is kept as the
+  // fallback so coverage never drops below the pre-rewrite baseline.
+  if (isPropositionReadingEnabled()) {
+    try { await stageNUL_structural(log, da); }
+    catch (err) { console.warn('stageNUL_structural failed:', err); }
+  }
   await stageNUL(log, text, da);
 
   // Surface classifier state explicitly so users don't wonder where
@@ -5986,6 +6036,345 @@ function findNearestAnchor(norm, entityAnchors) {
     if (key.includes(norm) || norm.includes(key)) return anc;
   }
   return null;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Proposition-reading pipeline (nl-explorer — rewrite plan.md §13)
+//
+// This block contains the new Resolution-face-gated extraction path.
+// It is opt-in via `window.EO_PROPOSITION_READING` (default: false).
+// When the flag is off the legacy stageCON_cooccurrence / stageSPO
+// flow remains the sole extractor so existing behavior is unchanged.
+// When on, `stageCON_typed` classifies every clause's Resolution
+// stance and allocates extraction budget accordingly — Binding clauses
+// get full SPO + modifier extraction, Tracing gets pattern features,
+// Tending only refreshes existing edges, etc. (§9 budget gate).
+// ─────────────────────────────────────────────────────────────
+
+// Map a Resolution-face cell id to one of the six CON types from §2.
+// The 9-cell Resolution face is Mode × Object. The plan's stance
+// labels (Binding, Tracing, Tending, Clearing, Dissecting, Unraveling,
+// plus Making, Composing, Cultivating) live on this face.
+const RESOLUTION_TO_CON_TYPE = Object.freeze({
+  // Mode=Relating
+  binding:     'binding',     // Relating × Entity
+  tracing:     'tracing',     // Relating × Pattern
+  tending:     'tending',     // Relating × Background
+  // Mode=Differentiating
+  clearing:    'clearing',    // Differentiating × Background
+  dissecting:  'dissecting',  // Differentiating × Entity
+  unraveling:  'unraveling',  // Differentiating × Pattern
+  // Mode=Making — creates new entities / propositions, not edges
+  making:      null,
+  composing:   null,
+  cultivating: null,          // unknown-NUL precursor (§8)
+});
+
+// Resolve a clause's stance from the classifier output. Falls back to a
+// heuristic that tags the clause based on its mechanical operator
+// footprint — sufficient for a first cut while the 27-cell face
+// decomposition (§10) is not yet wired through classifyClause.
+function stanceFromClassification(clauseText, classResult, mechOp) {
+  // Prefer the explicit face cell when classifyClause returns it.
+  const faceCell = classResult?.faces?.resolution?.cell_id
+                || classResult?.face_cells?.resolution
+                || classResult?.resolution_cell;
+  if (typeof faceCell === 'string') {
+    const k = faceCell.toLowerCase();
+    if (k in RESOLUTION_TO_CON_TYPE) return k;
+  }
+  // Heuristic: look for stance lexical markers. This is a shallow
+  // placeholder — the plan §2 predicts that centroid-based stance
+  // classification is the right mechanism and that the heuristic
+  // should only be the fallback when classifyClause has not yet run.
+  const t = (clauseText || '').toLowerCase();
+  if (/\b(not|never|no longer|without|contrary to|rejected|disputed)\b/.test(t)) return 'clearing';
+  if (/\b(distinguishes?|differs? from|unlike|as opposed to|in contrast)\b/.test(t)) return 'dissecting';
+  if (/\b(as (we have )?seen|recall|mentioned earlier|above)\b/.test(t)) return 'tending';
+  if (/\b(pattern|across|in general|typically|broadly)\b/.test(t)) return 'tracing';
+  if (/\b(will|may|might|should|could|possibly|potentially)\b/.test(t)) return 'cultivating';
+  return 'binding'; // default — the extraction-expensive stance
+}
+
+// Feature flag accessor. Defaults to off so legacy behavior is preserved.
+function isPropositionReadingEnabled() {
+  return !!(typeof window !== 'undefined' && window.EO_PROPOSITION_READING);
+}
+
+// stageCON_typed: rewrite-plan §2 + §13. Classifies each sentence by
+// its Resolution stance and emits CON entries with the matching
+// `con_type`. Only Binding clauses get full SPO extraction; other
+// stances emit minimal records (refresh, supersede, distinguish) that
+// the fold worker's foldCONTyped dispatcher knows how to handle.
+function stageCON_typed(log, sentences, entityAnchors, da, classifications) {
+  const stats = { binding: 0, tracing: 0, tending: 0, clearing: 0, dissecting: 0, unraveling: 0, cultivating: 0, unclassified: 0 };
+  const bindingQueue = []; // sentences to hand to stageSPO_from_binding
+
+  for (let i = 0; i < sentences.length; i++) {
+    const sent = sentences[i];
+    const classResult = classifications?.[i] || null;
+    const stance = stanceFromClassification(sent.text, classResult, null);
+    const conType = RESOLUTION_TO_CON_TYPE[stance];
+
+    if (!conType) {
+      // Making / Composing / Cultivating — no CON emitted. Cultivating
+      // routes to structural-NUL precursor tracking (§8).
+      if (stance === 'cultivating') {
+        emitCultivatingPrecursor(log, sent, da, classResult);
+      }
+      stats[stance] = (stats[stance] || 0) + 1;
+      continue;
+    }
+
+    // Find at least two entity anchors in the sentence — the
+    // minimum structural precondition for any CON type. Without two
+    // endpoints we can't build a typed edge; emit a well-formedness
+    // NUL instead of silently dropping.
+    const mentions = findSentenceEntityMentions(sent.text, entityAnchors);
+    if (mentions.length < 2) {
+      if (conType === 'binding' || conType === 'dissecting') {
+        log.push(makeEntry('NUL',
+          anchor(`nul:stance_no_endpoints:${stance}:${da}:${sent.start}`),
+          `doc:${da}`, {
+            absence_type: 'presupposition_gap',
+            con_type: conType,
+            signal: 'missing_endpoints',
+            note: `Clause classified as ${stance} but lacks two INS'd entities`,
+            sentence_fragment: sent.text.slice(0, 120),
+          }, {
+            source: 'mechanical:stance_wellformedness',
+            span_start: sent.start,
+            span_end: sent.end,
+            doc_anchor: da,
+            confidence: 0.8,
+          }));
+      }
+      stats[stance] = (stats[stance] || 0) + 1;
+      continue;
+    }
+
+    // Queue Binding clauses for the expensive SPO extraction; emit a
+    // lightweight placeholder CON so the fold worker starts tracking
+    // the predicate slot immediately.
+    for (let a = 0; a < mentions.length; a++) {
+      for (let b = a + 1; b < mentions.length; b++) {
+        const sAnchor = mentions[a].anchor;
+        const oAnchor = mentions[b].anchor;
+        const verb = findVerbBetween(sent.text, mentions[a].norm, mentions[b].norm);
+        log.push(makeEntry('CON',
+          anchor(`con:${conType}:${sAnchor}:${oAnchor}:${sent.start}`),
+          sAnchor, {
+            con_type: conType,
+            object_anchor: oAnchor,
+            predicate_token: verb || null,
+            verb: verb || null,
+            relation_type: conType === 'binding' ? 'binding' : conType,
+            stance,
+            site:   classResult?.faces?.site?.cell_id   || null,
+            act:    classResult?.faces?.act?.cell_id    || null,
+            cube_cell: classResult?.cube?.cell_id       || classResult?.cell_id || null,
+            sentence_fragment: sent.text.slice(0, 120),
+            subject_text: toDisplayName(mentions[a].norm),
+            object_text:  toDisplayName(mentions[b].norm),
+          }, {
+            source: 'mechanical:stance_con',
+            span_start: sent.start,
+            span_end: sent.end,
+            doc_anchor: da,
+            confidence: verb ? 0.7 : 0.55,
+          }));
+      }
+    }
+
+    stats[stance] = (stats[stance] || 0) + 1;
+    if (conType === 'binding') {
+      bindingQueue.push({ sent, classResult, mentions });
+    }
+  }
+  return { stats, bindingQueue };
+}
+
+function findSentenceEntityMentions(sentText, entityAnchors) {
+  const norms = Object.keys(entityAnchors || {});
+  if (!norms.length) return [];
+  const pattern = norms
+    .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .sort((a, b) => b.length - a.length)
+    .join('|');
+  const re = new RegExp('\\b(' + pattern + ')\\b', 'gi');
+  const lower = sentText.toLowerCase();
+  const seen = new Map();
+  let m;
+  while ((m = re.exec(lower)) !== null) {
+    const n = m[1].toLowerCase();
+    if (!seen.has(n)) seen.set(n, { norm: n, anchor: entityAnchors[n], offset: m.index });
+  }
+  return [...seen.values()].sort((x, y) => x.offset - y.offset);
+}
+
+function emitCultivatingPrecursor(log, sent, da, classResult) {
+  // §8: Cultivating events without a matching Making event flip the
+  // slot's NUL state to `unknown`. Emit a NUL entry tagged with the
+  // cultivating absence_type so the fold worker's M.cultivating map
+  // accumulates it.
+  const slot = (classResult?.slot_hint || extractSlotHint(sent.text) || 'unspecified').toLowerCase();
+  log.push(makeEntry('NUL',
+    anchor(`nul:cultivating:${slot}:${da}:${sent.start}`),
+    `doc:${da}`, {
+      absence_type: 'cultivating_without_making',
+      signal: 'cultivating',
+      slot,
+      note: 'Document gestures toward slot without instantiating',
+      sentence_fragment: sent.text.slice(0, 120),
+    }, {
+      source: 'mechanical:cultivating_precursor',
+      span_start: sent.start,
+      span_end: sent.end,
+      doc_anchor: da,
+      confidence: 0.6,
+    }));
+}
+
+function extractSlotHint(sentText) {
+  // Surface a target NP after an intent verb. Placeholder — the real
+  // mechanism routes through DEF crystallization on the Mode=Making
+  // face (§6). This captures enough to let the unknown-NUL map
+  // accumulate meaningfully while the face classifier is wired up.
+  const m = /\b(?:could|should|may|might|will)\s+([a-z][a-z\s]{2,30})/i.exec(sentText || '');
+  return m ? m[1].trim().toLowerCase() : null;
+}
+
+// stageSPO_from_binding: §13 — SPO now derives from Binding CONs
+// rather than running as a separate pass. Each queued binding clause
+// produces a Binding CON enriched with its modifier structure. The
+// LLM escalation path (H1 / tier 3 in §4) is not yet wired up; we
+// fall back to the existing heuristic extractor.
+function stageSPO_from_binding(log, bindingQueue, entityAnchors, da) {
+  const llmQueue = [];
+  for (const item of bindingQueue) {
+    const { sent, mentions, classResult } = item;
+    let triples = [];
+    try { triples = extractSPO_heuristic(sent.text); } catch {}
+    for (const triple of triples) {
+      const sNorm = normalizeNP(triple.s);
+      const oNorm = normalizeNP(triple.o);
+      const sAnchor = entityAnchors[sNorm] || findNearestAnchor(sNorm, entityAnchors);
+      const oAnchor = entityAnchors[oNorm] || findNearestAnchor(oNorm, entityAnchors);
+      if (!sAnchor || !oAnchor) {
+        llmQueue.push({ sent: sent.text, triple, sent_start: sent.start });
+        continue;
+      }
+      // Extract modifier structure — constitutive absences like
+      // "without competitive bidding" go into the proposition's
+      // modifier list AND emit a NUL projection (§8).
+      const modifiers = extractModifiers(sent.text);
+      const predNorm = triple.p.toLowerCase();
+      const conAnchor = anchor(`binding_spo:${sAnchor}:${predNorm}:${oAnchor}:${sent.start}`);
+      log.push(makeEntry('CON', conAnchor, sAnchor, {
+        con_type: 'binding',
+        object_anchor: oAnchor,
+        predicate_token: triple.p,
+        predicate_normalized: predNorm,
+        modifiers,
+        polarity: modifiers.some(m => m.polarity === 'NEGATED') ? 'ASSERTED' : 'ASSERTED',
+        stance: 'Binding',
+        site:   classResult?.faces?.site?.cell_id   || null,
+        act:    classResult?.faces?.act?.cell_id    || null,
+        relation_type: 'binding_spo',
+        subject_text: triple.s,
+        object_text:  triple.o,
+        sentence_fragment: sent.text.slice(0, 120),
+        spo: { s: triple.s, p: triple.p, o: triple.o },
+      }, {
+        source: 'mechanical:spo_from_binding',
+        span_start: sent.start + triple.s_start,
+        span_end: sent.start + triple.o_end,
+        doc_anchor: da,
+        confidence: triple.confidence,
+      }));
+      // Constitutive-modifier NULs (§2, §8).
+      for (const mod of modifiers) {
+        if (mod.polarity !== 'NEGATED') continue;
+        log.push(makeEntry('NUL',
+          anchor(`nul:modifier:${conAnchor}:${mod.type}:${mod.content}`),
+          conAnchor, {
+            absence_type: 'constitutive_modifier',
+            proposition_anchor: conAnchor,
+            modifier_type: mod.type,
+            content: mod.content,
+            note: 'Derived from proposition modifier, not keyword match',
+          }, {
+            source: 'mechanical:constitutive_modifier',
+            span_start: sent.start,
+            span_end: sent.end,
+            doc_anchor: da,
+            confidence: 0.8,
+          }));
+      }
+    }
+    if (triples.length === 0) {
+      llmQueue.push({ sent: sent.text, triple: null, sent_start: sent.start });
+    }
+  }
+  return llmQueue;
+}
+
+function extractModifiers(sentText) {
+  // Shallow modifier extraction. Captures the constitutive-absence
+  // pattern "without X" called out in the plan §2, plus common manner
+  // and purpose modifiers. This is a scaffold — the full grammar hook
+  // belongs in the LLM pass (H1) once rate limiting is designed.
+  const mods = [];
+  const withoutRe = /\bwithout\s+([a-z][a-z\s-]{2,40})/gi;
+  let m;
+  while ((m = withoutRe.exec(sentText)) !== null) {
+    mods.push({ type: 'negation', content: m[1].trim().toLowerCase(), polarity: 'NEGATED' });
+  }
+  const inOrderRe = /\bin order to\s+([a-z][a-z\s]{2,40})/gi;
+  while ((m = inOrderRe.exec(sentText)) !== null) {
+    mods.push({ type: 'purpose', content: m[1].trim().toLowerCase(), polarity: 'POSITIVE' });
+  }
+  return mods;
+}
+
+// stageEVA_proposition: §7 — EVA at the proposition level. Tests a
+// newly-accumulated proposition against the established DEF frame of
+// a prior proposition. Placeholder: defers to the fold worker's
+// existing proposition-level bookkeeping and emits no entries until
+// the cross-doc investigative EVA logic (§7 "$4.2M vs $1.9M") is
+// specified in more detail.
+async function stageEVA_proposition(log, da) {
+  if (!workerBridge?.ready) return { tested: 0 };
+  try {
+    const props = await workerRequest(workerBridge.foldWorker,
+      'get_propositions', { doc_anchor: da });
+    let tested = 0;
+    for (const [propAnchor, prop] of Object.entries(props || {})) {
+      // No-op placeholder — the actual frame-test logic depends on
+      // propDEFFrames which the slot crystallization stage populates.
+      // We just count the propositions that passed INS so the caller
+      // can surface progress.
+      if (prop.insd) tested++;
+    }
+    return { tested };
+  } catch (err) {
+    console.warn('stageEVA_proposition failed:', err);
+    return { tested: 0, error: err?.message };
+  }
+}
+
+// stageNUL_structural: §8 — emit NULs derived from integral history
+// rather than keyword match. Walks the fold worker's Cultivating map
+// and the proposition-decay state. The legacy keyword `stageNUL`
+// continues to run as a fallback (demoted but not removed, per §13).
+async function stageNUL_structural(log, da) {
+  if (!workerBridge?.ready) return { emitted: 0 };
+  // The worker already owns the cultivating / decay state — we only
+  // need to request it and mirror any fresh NUL entries into the log
+  // so UI filtering by op has them. The fold worker generates these
+  // internally when appropriate, so this stage is mostly a hook for
+  // future cross-doc structural-NUL aggregation.
+  return { emitted: 0 };
 }
 
 // stageSPO: runs alongside the legacy co-occurrence extractor. When it finds

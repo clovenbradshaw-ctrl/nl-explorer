@@ -66,6 +66,31 @@ downloads the canonical corpus from
 
 No build step, no server, no install required to run.
 
+## Proposition-reading pipeline (opt-in)
+
+The rewrite plan in `nl-explorer — rewrite plan.md` extends the
+architecture from entity-level to proposition-level tracking — adding
+proposition anchors (`@p:`), predicate-slot anchors (`@ps:`), a
+six-member Resolution-face CON family
+(Binding / Tracing / Tending / Clearing / Dissecting / Unraveling),
+per-slot predicate-class DEF crystallization, and
+Cultivating-without-Making NUL tracking.
+
+The mechanical foundations land in `workers/fold-worker.js` (M-state
+additions, `foldCONTyped` dispatcher, `crystallizeSlots`) and the new
+pipeline stages (`stageCON_typed`, `stageSPO_from_binding`,
+`stageEVA_proposition`, `stageNUL_structural`) ship in `index.html`.
+They run only when the feature flag is enabled:
+
+```js
+window.EO_PROPOSITION_READING = true;
+```
+
+With the flag off (the default) the legacy co-occurrence CON +
+heuristic SPO path is preserved unchanged. With the flag on, every
+clause is classified by Resolution stance and only Binding clauses
+receive the expensive SPO + modifier extraction (plan §9 budget gate).
+
 ## Key invariants
 
 - The 27 centroids never change at runtime.

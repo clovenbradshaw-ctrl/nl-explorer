@@ -27,7 +27,91 @@ const M = {
   // party"). Each entry: { slot_norm: { ts_first_seen, doc_anchor } }.
   // Used by structural NUL emission.
   schemaSlots: new Map(),
+
+  // ── Proposition layer (rewrite-plan §11) ────────────────────────
+  // Proposition anchors (`@p:<hash>`) — claims the document makes. A
+  // proposition is a predicate-argument structure that accumulates its
+  // own integral via structural matching (§4) and crystallizes a DEF
+  // frame once its slot, arguments, and modifiers have stabilized.
+  propositions:   new Map(), // @p:<hash> → { subject, predicate_slot, object, modifiers, polarity, stance, evidential, ts, docs:Set }
+  // Predicate-slot anchors (`@ps:<hash>`) — the relational slot between
+  // a subject and object entity. Multiple Binding CONs accumulate their
+  // predicate verb embeddings into the same slot; when the variance
+  // drops below θ_DEF the slot crystallizes a predicate class.
+  predicateSlots: new Map(), // @ps:<hash> → { subject, object, verbs:Map(verb→count), verb_embeddings:[], predicate_class, crystallized, ts_first_seen }
+  // Integral accumulators — I_p(p) and I_slot(p). Kept separate from the
+  // entity integral maps so proposition decay can run on its own SEG-
+  // boundary λ schedule (rewrite-plan §5).
+  propIntegrals:  new Map(), // @p:<hash>  → number
+  slotIntegrals:  new Map(), // @ps:<hash> → number
+  // DEF frames for propositions — what the claim asserts once its
+  // slot is crystallized and its argument anchors are both INS'd.
+  propDEFFrames:  new Map(), // @p:<hash>  → { predicate_class, argument_types, modifiers, evidential, resolution }
+  // Cultivating events targeting a slot (unknown-NUL precursors, §8).
+  // A Cultivating-without-Making pattern flips the NUL state to
+  // `unknown` — the document is gesturing without instantiating.
+  cultivating:   new Map(), // slot_key → [{ts, doc_anchor, span}]
+  // Negation edges — a Clearing CON records the prior proposition it
+  // supersedes. Used by EVA conflicts and by the graph render to show
+  // prior-proposition demolition rather than silently hiding them.
+  negated:       new Map(), // @p:hash → @p:hash (superseding → superseded)
+  // Distinction edges — Dissecting results. Entities that were prior
+  // conflated and are now explicitly distinguished by the document.
+  distinctions:  new Map(), // @e:hash → Set<@e:hash>
 };
+
+// Proposition-level thresholds. Kept local so tuning doesn't collide
+// with the entity-level integral constants above.
+const PROP_INS_THRESHOLD      = 2.5;   // θ_INS for I_p
+const SLOT_DEF_VARIANCE       = 0.30;  // θ_DEF for predicate-class variance
+const SLOT_CRYSTALLIZE_MIN    = 3;     // minimum Binding events before a slot can crystallize
+const PROP_MATCH_WEIGHT = {
+  slot:             1.0,   // subject+object match → full-weight accumulation
+  predicate_class:  0.8,   // predicate near slot's crystallized centroid
+  paraphrase:       0.5,   // LLM structural match (H1) — tier 3
+  near_miss:        0.3,
+};
+
+// The six-member CON family from §2. `binding` is the only member that
+// creates new entity-graph edges; the others operate on existing
+// structure. `cooccurrence` is retained as the legacy default so the
+// pre-rewrite stageCON_cooccurrence continues to function unchanged.
+const CON_TYPES = Object.freeze({
+  BINDING:       'binding',
+  TRACING:       'tracing',
+  TENDING:       'tending',
+  CLEARING:      'clearing',
+  DISSECTING:    'dissecting',
+  UNRAVELING:    'unraveling',
+  // Legacy — not part of the Resolution-face family.
+  COOCCURRENCE:  'cooccurrence',
+});
+
+// Structural-NUL absence_type vocabulary (§8 + §12). Main-thread
+// emitters use these to mark why the slot is empty rather than the
+// legacy keyword-only NULs.
+const NUL_ABSENCE = Object.freeze({
+  CULTIVATING_WITHOUT_MAKING:  'cultivating_without_making',
+  CONSTITUTIVE_MODIFIER:       'constitutive_modifier',
+  PROPOSITION_DECAYED:         'proposition_decayed',
+  ENDPOINT_NOT_INSTANTIATED:   'endpoint_not_instantiated', // legacy / premature-CON
+  EXPLICIT_CLAIM:              'explicit_claim',            // legacy keyword NUL
+});
+
+// Anchor-namespace helpers. The entity anchor stays compatible with the
+// legacy `@<hash>` form (anchorLocal) — only the new proposition and
+// predicate-slot anchors carry the `@p:` / `@ps:` prefixes required by
+// the rewrite plan §1.
+function propositionAnchorLocal(subjectAnchor, slotAnchor, objectAnchor) {
+  const raw = `p|${subjectAnchor || ''}|${slotAnchor || ''}|${objectAnchor || ''}`;
+  return '@p:' + anchorLocal(raw).slice(1); // strip the legacy `@` prefix
+}
+function predicateSlotAnchorLocal(subjectAnchor, objectAnchor) {
+  // Undirected slot key — the plan treats NDP→NDMC and the "received
+  // from" reverse direction as the same relational slot (§1, §3).
+  const [a, b] = [subjectAnchor || '', objectAnchor || ''].sort();
+  return '@ps:' + anchorLocal(`ps|${a}|${b}`).slice(1);
+}
 
 // Structural-position multipliers for SIG strength (spec §"The wave fold").
 const STRUCTURAL_WEIGHT = {
@@ -147,6 +231,19 @@ function fold(entry, record = true) {
 }
 
 function foldINS(entry) {
+  // Proposition-registry INS (rewrite-plan §12): record that the
+  // proposition has crossed θ_INS. The proposition record itself was
+  // created in registerProposition(); we only mark the op here so
+  // downstream consumers (graph render, pressure map) can filter on it.
+  if (entry.target === 'proposition-registry') {
+    const propAnchor = entry.anchor;
+    const prop = M.propositions.get(propAnchor);
+    if (prop) {
+      prop.insd = true;
+      prop.ts_ins = entry.ts;
+    }
+    return;
+  }
   if (entry.target !== 'entity-registry') return;
   const a = entry.anchor;
   const sig_count = entry.provenance?.sig_count || entry.operand?.sig_count_at_ins || 1;
@@ -230,6 +327,18 @@ function foldCON(entry) {
   const o = entry.operand?.object_anchor;
   if (!s || !o) return;
 
+  // Resolution-face CON family dispatch (rewrite-plan §2). Only Binding
+  // creates new entity-graph edges. Tracing updates SYN topology.
+  // Tending refreshes λ decay on an existing CON — no new edge.
+  // Clearing / Dissecting / Unraveling operate on existing structure.
+  // When con_type is absent we fall through to the legacy co-occurrence
+  // path so the pre-rewrite pipeline continues unchanged.
+  const conType = entry.operand?.con_type || null;
+  if (conType && conType !== CON_TYPES.COOCCURRENCE) {
+    const handled = foldCONTyped(entry, conType, s, o);
+    if (handled) return;
+  }
+
   // Premature CON (spec §5.2): if either endpoint is still a pre-INS candidate,
   // queue this CON and emit a NUL marking the deferral. The drainer reprocesses
   // it once both endpoints have INS'd.
@@ -310,6 +419,388 @@ function foldCON(entry) {
 
   markDirty(s);
   markDirty(o);
+}
+
+// ── Resolution-face CON family (rewrite-plan §2) ──────────────
+// Returns true if the entry was fully handled in the typed path and
+// should NOT fall through to the legacy co-occurrence code. Returns
+// false when the preconditions failed and the caller should degrade
+// gracefully (legacy path or DAG-violation NUL).
+function foldCONTyped(entry, conType, s, o) {
+  const bothInsd = M.entities.has(s) && M.entities.has(o);
+  const predicateSlotAnchor = predicateSlotAnchorLocal(s, o);
+  const objAnchor = o;
+  const conf = entry.provenance?.confidence ?? 0.6;
+
+  switch (conType) {
+    case CON_TYPES.BINDING: {
+      // Precondition (plan §2): both endpoints must be INS'd.
+      if (!bothInsd) {
+        emitWellFormednessNUL(entry, conType, 'endpoints_not_instantiated');
+        return false;
+      }
+      // Create / refresh the predicate slot and accumulate its
+      // predicate-verb integral. This is the mechanism that drives per-
+      // slot DEF crystallization in §3.
+      accumulateIntoSlot(predicateSlotAnchor, s, o, entry);
+      // Create or update the proposition anchor. Multiple Binding
+      // events in the same slot with compatible object_anchors map to
+      // the same proposition integral (§4 tier 1: slot match).
+      const propAnchor = registerProposition(entry, s, o, predicateSlotAnchor);
+      accumulatePropositionIntegral(propAnchor, entry, PROP_MATCH_WEIGHT.slot);
+      // Only Binding creates entity-graph edges — this is the
+      // architectural commitment that prevents the hairball.
+      writeEntityEdge(s, o, entry, predicateSlotAnchor, propAnchor);
+      markDirty(s); markDirty(o);
+      return true;
+    }
+    case CON_TYPES.TENDING: {
+      // Tending modifies λ, not σ (plan §5). It refreshes an existing
+      // edge's decay without pushing its integral past θ_INS. If no
+      // prior CON exists for this pair the document is invoking a
+      // relationship the reader is expected to supply — emit a
+      // well-formedness NUL (§2).
+      const key = `${s}:${o}`;
+      const edge = M.conEdges.get(key) || M.conEdges.get(`${o}:${s}`);
+      if (!edge) {
+        emitWellFormednessNUL(entry, conType, 'tending_without_prior_con');
+        return true;
+      }
+      edge.last_tend_ts = entry.ts;
+      edge.tend_count = (edge.tend_count || 0) + 1;
+      // Refresh slot integral without triggering proposition INS.
+      bumpSlotLambda(predicateSlotAnchor);
+      return true;
+    }
+    case CON_TYPES.CLEARING: {
+      // Negate a prior proposition. §2: "demolishing a frame that was
+      // never built in this corpus" emits a presupposition-gap NUL.
+      const targetPropAnchor = entry.operand?.supersedes
+        || findPriorPropositionForPair(s, o);
+      if (!targetPropAnchor) {
+        emitWellFormednessNUL(entry, conType, 'clearing_without_prior_proposition');
+        return true;
+      }
+      M.negated.set(entry.anchor, targetPropAnchor);
+      const prop = M.propositions.get(targetPropAnchor);
+      if (prop) {
+        prop.superseded_by = entry.anchor;
+        prop.polarity = 'NEGATED';
+      }
+      return true;
+    }
+    case CON_TYPES.DISSECTING: {
+      // Distinction edge — both endpoints must exist and have been
+      // prior-conflated somewhere in the corpus.
+      if (!bothInsd) {
+        emitWellFormednessNUL(entry, conType, 'dissecting_requires_insd_endpoints');
+        return false;
+      }
+      if (!M.distinctions.has(s)) M.distinctions.set(s, new Set());
+      if (!M.distinctions.has(o)) M.distinctions.set(o, new Set());
+      M.distinctions.get(s).add(o);
+      M.distinctions.get(o).add(s);
+      return true;
+    }
+    case CON_TYPES.TRACING: {
+      // Pattern-level — the proposition itself is a pattern across ≥2
+      // supporting Binding pairs. Route through SYN rather than the
+      // entity edge graph.
+      const supports = entry.operand?.supporting_bindings || [];
+      if (supports.length < 2) {
+        emitWellFormednessNUL(entry, conType, 'tracing_without_binding_support');
+        return true;
+      }
+      // Emit a synthesized SYN update via the same markDirty path so
+      // the continuous loop picks it up.
+      markDirty(s); markDirty(o);
+      return true;
+    }
+    case CON_TYPES.UNRAVELING: {
+      // Weakens an existing SYN node's coherence. Not an entity-graph
+      // operation — just mark the target SYN node for re-evaluation.
+      const synTarget = entry.operand?.syn_anchor;
+      if (!synTarget) {
+        emitWellFormednessNUL(entry, conType, 'unraveling_requires_syn_target');
+        return true;
+      }
+      markDirty(synTarget);
+      return true;
+    }
+  }
+  return false;
+}
+
+function emitWellFormednessNUL(entry, conType, reason) {
+  const nul = makeEntryLocal('NUL',
+    anchorLocal(`nul:wellformed:${conType}:${entry.anchor}`),
+    entry.target, {
+      absence_type: 'presupposition_gap',
+      con_type: conType,
+      reason,
+      signal: reason,
+      object_anchor: entry.operand?.object_anchor,
+      note: `DAG violation: ${conType} without required dependency`,
+    }, {
+      source: 'mechanical:con_wellformedness',
+      doc_anchor: entry.provenance?.doc_anchor,
+      span_start: entry.provenance?.span_start,
+      span_end: entry.provenance?.span_end,
+      confidence: 0.85,
+    });
+  fold(nul);
+}
+
+// Accumulate the predicate-verb evidence for a slot. Once the slot has
+// seen enough Binding events with low predicate-embedding variance we
+// can crystallize a predicate class (plan §3) — the emission itself
+// happens in crystallizeSlots(); this function just updates state.
+function accumulateIntoSlot(slotAnchor, s, o, entry) {
+  let slot = M.predicateSlots.get(slotAnchor);
+  if (!slot) {
+    slot = {
+      anchor: slotAnchor,
+      subject: s,
+      object: o,
+      verbs: new Map(),          // verb → count
+      verb_embeddings: [],        // raw embeddings from classifier (§3)
+      predicate_class: null,      // crystallized medoid verb
+      crystallized: false,
+      ts_first_seen: entry.ts,
+      doc_anchors: new Set(),
+    };
+    M.predicateSlots.set(slotAnchor, slot);
+  }
+  const verb = (entry.operand?.predicate_token
+             || entry.operand?.verb
+             || entry.operand?.predicate
+             || '').trim().toLowerCase();
+  if (verb) slot.verbs.set(verb, (slot.verbs.get(verb) || 0) + 1);
+  const emb = entry.operand?.predicate_embedding;
+  if (Array.isArray(emb) && emb.length) slot.verb_embeddings.push(emb);
+  if (entry.provenance?.doc_anchor) slot.doc_anchors.add(entry.provenance.doc_anchor);
+  // Slot integral accumulates the confidence of each supporting Binding.
+  const cur = M.slotIntegrals.get(slotAnchor) || 0;
+  M.slotIntegrals.set(slotAnchor,
+    cur + (entry.provenance?.confidence ?? 0.6));
+}
+
+function bumpSlotLambda(slotAnchor) {
+  // Tending suppresses decay on the slot's integral without adding σ.
+  // In this discrete implementation we just mark the slot as recently
+  // tended so the next SEG boundary applies a smaller multiplier.
+  const slot = M.predicateSlots.get(slotAnchor);
+  if (slot) slot.last_tend_ts = Date.now();
+}
+
+// Register or re-register a proposition anchor for a (subject, slot,
+// object) triple. Idempotent — multiple Binding events on the same
+// slot/object map to the same @p anchor so their integrals accumulate.
+function registerProposition(entry, s, o, slotAnchor) {
+  const propAnchor = propositionAnchorLocal(s, slotAnchor, o);
+  let prop = M.propositions.get(propAnchor);
+  if (!prop) {
+    prop = {
+      anchor: propAnchor,
+      subject: s,
+      object: o,
+      predicate_slot: slotAnchor,
+      modifiers: Array.isArray(entry.operand?.modifiers)
+        ? entry.operand.modifiers.slice() : [],
+      polarity:  entry.operand?.polarity   || 'ASSERTED',
+      stance:    entry.operand?.stance     || 'Binding',
+      evidential: entry.operand?.evidential || null,
+      ts:        entry.ts,
+      docs:      new Set(entry.provenance?.doc_anchor
+        ? [entry.provenance.doc_anchor] : []),
+      support_count: 0,
+    };
+    M.propositions.set(propAnchor, prop);
+  } else {
+    if (entry.provenance?.doc_anchor) prop.docs.add(entry.provenance.doc_anchor);
+    // Merge modifiers — preserving constitutive absences (§2).
+    if (Array.isArray(entry.operand?.modifiers)) {
+      for (const m of entry.operand.modifiers) prop.modifiers.push(m);
+    }
+  }
+  prop.support_count++;
+  return propAnchor;
+}
+
+function accumulatePropositionIntegral(propAnchor, entry, matchWeight) {
+  const sigma = (entry.provenance?.confidence ?? 0.6) * matchWeight;
+  const next = (M.propIntegrals.get(propAnchor) || 0) + sigma;
+  M.propIntegrals.set(propAnchor, next);
+  // Proposition INS fires once I_p crosses θ_INS. Emit an INS entry
+  // against the `proposition-registry` target so foldINS can record
+  // the proposition as established (plan §12).
+  if (next >= PROP_INS_THRESHOLD) {
+    const prop = M.propositions.get(propAnchor);
+    if (prop && !prop.insd) {
+      prop.insd = true;
+      const insEntry = makeEntryLocal('INS',
+        propAnchor, 'proposition-registry', {
+          anchor_type: 'proposition',
+          subject: prop.subject,
+          predicate_slot: prop.predicate_slot,
+          object: prop.object,
+          integral_at_ins: parseFloat(next.toFixed(3)),
+          support_count: prop.support_count,
+        }, {
+          source: 'mechanical:proposition_ins',
+          doc_anchor: entry.provenance?.doc_anchor,
+          confidence: Math.min(0.95, next / PROP_INS_THRESHOLD * 0.5),
+        });
+      fold(insEntry);
+    }
+  }
+}
+
+function writeEntityEdge(s, o, entry, slotAnchor, propAnchor) {
+  const key = `${s}:${o}`;
+  const existing = M.conEdges.get(key);
+  const predicate = entry.operand?.predicate_token
+                 || entry.operand?.verb
+                 || entry.operand?.relation_type
+                 || 'related';
+  if (existing) {
+    existing.confidence = Math.min(0.99, existing.confidence + 0.05);
+    existing.sources.push(entry.provenance?.doc_anchor);
+    existing.count++;
+    existing.predicate_slot = slotAnchor;
+    existing.con_type = CON_TYPES.BINDING;
+    (existing.propositions ||= []).push(propAnchor);
+  } else {
+    M.conEdges.set(key, {
+      s, o,
+      predicate,
+      predicate_slot: slotAnchor,
+      con_type: CON_TYPES.BINDING,
+      propositions: [propAnchor],
+      confidence: entry.provenance?.confidence || 0.5,
+      sources: [entry.provenance?.doc_anchor],
+      count: 1,
+      ts: entry.ts,
+    });
+  }
+  const ent = M.entities.get(s);
+  if (ent && !ent.ops.includes('CON')) ent.ops.push('CON');
+}
+
+function findPriorPropositionForPair(s, o) {
+  // First match wins — used by Clearing when it doesn't name a specific
+  // supersedes target. Returns null when no prior proposition exists
+  // between the pair (caller emits presupposition_gap NUL).
+  for (const [anc, p] of M.propositions) {
+    if ((p.subject === s && p.object === o) ||
+        (p.subject === o && p.object === s)) return anc;
+  }
+  return null;
+}
+
+// Slot DEF crystallization (plan §3). When a slot's predicate-
+// embedding variance drops below SLOT_DEF_VARIANCE and it has at least
+// SLOT_CRYSTALLIZE_MIN supports, emit a DEF entry naming the slot's
+// predicate class. Invoked from the `crystallize_slots` op router.
+function crystallizeSlots(docAnchor) {
+  let emitted = 0;
+  for (const [slotAnchor, slot] of M.predicateSlots) {
+    if (slot.crystallized) continue;
+    if (docAnchor && !slot.doc_anchors.has(docAnchor)) continue;
+    const supports = [...slot.verbs.values()].reduce((a,b)=>a+b, 0);
+    if (supports < SLOT_CRYSTALLIZE_MIN) continue;
+
+    // Variance of the predicate-verb counts (proxy for embedding
+    // variance when no embedding is supplied — the full embedding
+    // variance path is available when the main thread feeds
+    // `predicate_embedding` into each Binding CON).
+    const embVar = slot.verb_embeddings.length >= 2
+      ? embeddingVariance(slot.verb_embeddings)
+      : surfaceVerbVariance(slot.verbs);
+    if (embVar > SLOT_DEF_VARIANCE) {
+      // High variance → bifurcation pressure (plan §3).
+      emitSlotBifurcationREC(slotAnchor, slot, embVar, docAnchor);
+      continue;
+    }
+
+    const medoid = pickMedoidVerb(slot);
+    slot.predicate_class = medoid;
+    slot.crystallized = true;
+
+    const defEntry = makeEntryLocal('DEF',
+      anchorLocal('def:slot:' + slotAnchor + ':' + (docAnchor || 'global')),
+      slotAnchor, {
+        param: 'predicate_class',
+        value: medoid,
+        slot_subject: slot.subject,
+        slot_object:  slot.object,
+        supporting_verbs: Object.fromEntries(slot.verbs),
+        variance: parseFloat(embVar.toFixed(4)),
+        note: 'crystallized per-slot predicate class',
+        resolution: 'full',
+      }, {
+        source: 'mechanical:slot_crystallization',
+        doc_anchor: docAnchor,
+        confidence: 0.9,
+      });
+    fold(defEntry);
+    emitted++;
+  }
+  return { emitted };
+}
+
+function embeddingVariance(embeddings) {
+  const n = embeddings.length;
+  const dim = embeddings[0].length;
+  const mean = new Array(dim).fill(0);
+  for (const e of embeddings) for (let i=0;i<dim;i++) mean[i] += e[i];
+  for (let i=0;i<dim;i++) mean[i] /= n;
+  let v = 0;
+  for (const e of embeddings) {
+    for (let i=0;i<dim;i++) v += (e[i]-mean[i])**2;
+  }
+  return v / (n * dim);
+}
+
+function surfaceVerbVariance(verbMap) {
+  // Fallback: normalized entropy of the verb distribution. High entropy
+  // ⇒ many different verbs ⇒ high variance.
+  const counts = [...verbMap.values()];
+  if (counts.length < 2) return 0;
+  const total = counts.reduce((a,b)=>a+b, 0);
+  let h = 0;
+  for (const c of counts) {
+    const p = c / total;
+    h -= p * Math.log(p);
+  }
+  return h / Math.log(counts.length); // normalized 0..1
+}
+
+function pickMedoidVerb(slot) {
+  // Without embeddings: return the most-frequent verb.
+  let best = null, max = -1;
+  for (const [v, c] of slot.verbs) {
+    if (c > max) { max = c; best = v; }
+  }
+  return best || 'related';
+}
+
+function emitSlotBifurcationREC(slotAnchor, slot, variance, docAnchor) {
+  const rec = makeEntryLocal('REC',
+    anchorLocal('rec:slot_bifurcation:' + slotAnchor),
+    slotAnchor, {
+      trigger: 'slot_predicate_bifurcation',
+      variance: parseFloat(variance.toFixed(4)),
+      slot_subject: slot.subject,
+      slot_object:  slot.object,
+      note: 'Two relational types conflated under one subject/object pair',
+      resolution: 'pending_human',
+    }, {
+      source: 'mechanical:slot_bifurcation',
+      doc_anchor: docAnchor,
+      confidence: 0.75,
+    });
+  fold(rec);
 }
 
 // Established predicates for an entity pair — verbs whose integral has
@@ -659,12 +1150,53 @@ function countAboveWorkingSet(grain) {
 
 function foldNUL(entry) {
   const a = entry.target;
+  const absType = entry.operand?.absence_type;
+
+  // Structural-NUL routing (rewrite-plan §8). Constitutive-modifier
+  // NULs project onto proposition anchors rather than entity anchors.
+  // Proposition-decayed NULs clear the proposition's `insd` flag.
+  if (absType === NUL_ABSENCE.CONSTITUTIVE_MODIFIER) {
+    const propAnchor = entry.operand?.proposition_anchor;
+    const prop = propAnchor && M.propositions.get(propAnchor);
+    if (prop) {
+      (prop.modifiers ||= []).push({
+        type: entry.operand?.modifier_type || 'negation',
+        content: entry.operand?.content,
+        polarity: 'NEGATED',
+        nul_backed: true,
+      });
+    }
+    return;
+  }
+  if (absType === NUL_ABSENCE.PROPOSITION_DECAYED) {
+    const propAnchor = entry.operand?.proposition_anchor || a;
+    const prop = M.propositions.get(propAnchor);
+    if (prop) {
+      prop.cleared = true;
+      prop.insd = false;
+    }
+    return;
+  }
+  if (absType === NUL_ABSENCE.CULTIVATING_WITHOUT_MAKING) {
+    // The main-thread stageNUL_structural emits this after detecting
+    // Cultivating-without-Making; we just record it so the pressure
+    // loop can surface it as REC when the pattern persists.
+    const slotKey = (entry.operand?.slot || a || '').toLowerCase();
+    if (!M.cultivating.has(slotKey)) M.cultivating.set(slotKey, []);
+    M.cultivating.get(slotKey).push({
+      ts: entry.ts,
+      doc_anchor: entry.provenance?.doc_anchor,
+      span_start: entry.provenance?.span_start,
+    });
+    return;
+  }
+
   if (M.entities.has(a)) {
     const ent = M.entities.get(a);
     if (!ent.nul_signals) ent.nul_signals = [];
     ent.nul_signals.push({
       signal: entry.operand?.signal,
-      absence_type: entry.operand?.absence_type,
+      absence_type: absType,
       ts: entry.ts,
     });
     updatePressure(a);
@@ -1029,6 +1561,27 @@ async function writeCheckpoint(corpus) {
     recPending: Object.fromEntries(M.recPending),
     pressure: Object.fromEntries(M.pressure),
     displayNames: Object.fromEntries(M.displayNames),
+    // Proposition layer (rewrite-plan §11).
+    propositions: Object.fromEntries(
+      [...M.propositions.entries()].map(([k, v]) => [k, {
+        ...v, docs: [...(v.docs || [])],
+      }])
+    ),
+    predicateSlots: Object.fromEntries(
+      [...M.predicateSlots.entries()].map(([k, v]) => [k, {
+        ...v,
+        verbs: Object.fromEntries(v.verbs || []),
+        doc_anchors: [...(v.doc_anchors || [])],
+      }])
+    ),
+    propIntegrals: Object.fromEntries(M.propIntegrals),
+    slotIntegrals: Object.fromEntries(M.slotIntegrals),
+    propDEFFrames: Object.fromEntries(M.propDEFFrames),
+    cultivating:   Object.fromEntries(M.cultivating),
+    negated:       Object.fromEntries(M.negated),
+    distinctions:  Object.fromEntries(
+      [...M.distinctions.entries()].map(([k, v]) => [k, [...v]])
+    ),
     ts: new Date().toISOString(),
   };
   const handle = await corpus.getFileHandle('m_checkpoint.json', { create: true });
@@ -1051,6 +1604,21 @@ function restoreFromCheckpoint(cp) {
   for (const [k,v] of Object.entries(cp.recPending||{}))   M.recPending.set(k,v);
   for (const [k,v] of Object.entries(cp.pressure||{}))     M.pressure.set(k,v);
   for (const [k,v] of Object.entries(cp.displayNames||{})) M.displayNames.set(k,v);
+  // Proposition layer.
+  for (const [k,v] of Object.entries(cp.propositions||{}))
+    M.propositions.set(k, {...v, docs: new Set(v.docs || [])});
+  for (const [k,v] of Object.entries(cp.predicateSlots||{}))
+    M.predicateSlots.set(k, {
+      ...v,
+      verbs: new Map(Object.entries(v.verbs || {})),
+      doc_anchors: new Set(v.doc_anchors || []),
+    });
+  for (const [k,v] of Object.entries(cp.propIntegrals||{}))  M.propIntegrals.set(k, v);
+  for (const [k,v] of Object.entries(cp.slotIntegrals||{}))  M.slotIntegrals.set(k, v);
+  for (const [k,v] of Object.entries(cp.propDEFFrames||{}))  M.propDEFFrames.set(k, v);
+  for (const [k,v] of Object.entries(cp.cultivating||{}))    M.cultivating.set(k, v);
+  for (const [k,v] of Object.entries(cp.negated||{}))        M.negated.set(k, v);
+  for (const [k,v] of Object.entries(cp.distinctions||{}))   M.distinctions.set(k, new Set(v));
 }
 
 // ── Message router ────────────────────────────────────────────
@@ -1202,6 +1770,76 @@ self.onmessage = async (e) => {
     } else if (op === 'crystallize_frames') {
       const r = crystallizeFrames(payload?.doc_anchor);
       self.postMessage({ id, result: r });
+    } else if (op === 'crystallize_slots') {
+      // Rewrite-plan §3 — per-slot predicate-class DEF crystallization.
+      const r = crystallizeSlots(payload?.doc_anchor);
+      self.postMessage({ id, result: r });
+    } else if (op === 'get_propositions') {
+      // Returns all proposition records (INS'd and accumulating).
+      const out = {};
+      const da = payload?.doc_anchor;
+      for (const [k, v] of M.propositions) {
+        if (da && !v.docs?.has?.(da)) continue;
+        out[k] = { ...v, docs: [...(v.docs || [])], integral: M.propIntegrals.get(k) || 0 };
+      }
+      self.postMessage({ id, result: out });
+    } else if (op === 'get_proposition_graph') {
+      // Dual graph: entity nodes + edges partitioned by con_type, plus
+      // proposition nodes floating above. Used by the explorer's new
+      // proposition-view render path (rewrite-plan §11).
+      const entities = {};
+      for (const [k, v] of M.entities) entities[k] = { ...v, docs: [...(v.docs || [])] };
+      const edgesByType = { binding: {}, tracing: {}, tending_refreshed: {}, clearing: {}, dissecting: {}, legacy: {} };
+      for (const [k, v] of M.conEdges) {
+        const bucket = v.con_type === CON_TYPES.BINDING       ? 'binding'
+                     : v.con_type === CON_TYPES.TRACING       ? 'tracing'
+                     : v.con_type === CON_TYPES.TENDING       ? 'tending_refreshed'
+                     : v.con_type === CON_TYPES.CLEARING      ? 'clearing'
+                     : v.con_type === CON_TYPES.DISSECTING    ? 'dissecting'
+                     : 'legacy';
+        edgesByType[bucket][k] = v;
+      }
+      const propositions = {};
+      for (const [k, v] of M.propositions) {
+        propositions[k] = { ...v, docs: [...(v.docs || [])], integral: M.propIntegrals.get(k) || 0 };
+      }
+      const slots = {};
+      for (const [k, v] of M.predicateSlots) {
+        slots[k] = {
+          ...v,
+          verbs: Object.fromEntries(v.verbs || []),
+          doc_anchors: [...(v.doc_anchors || [])],
+          integral: M.slotIntegrals.get(k) || 0,
+        };
+      }
+      self.postMessage({ id, result: {
+        nodes: entities,
+        edges: edgesByType,
+        propositions,
+        slots,
+        negated: Object.fromEntries(M.negated),
+        distinctions: Object.fromEntries(
+          [...M.distinctions.entries()].map(([k, v]) => [k, [...v]])
+        ),
+        displayNames: Object.fromEntries(M.displayNames),
+      }});
+    } else if (op === 'cultivating_gap_for_slot') {
+      // Structural NUL for the Cultivating-without-Making pattern (§8):
+      // the slot was gestured toward but never instantiated as a
+      // Binding CON. Returns { cultivating_count, making_count, state }.
+      const slotKey = (payload?.slot || '').trim().toLowerCase();
+      const cult = (M.cultivating.get(slotKey) || []).length;
+      let making = 0;
+      for (const slot of M.predicateSlots.values()) {
+        if ((slot.subject || '').toLowerCase().includes(slotKey) ||
+            (slot.object  || '').toLowerCase().includes(slotKey)) {
+          making += [...(slot.verbs?.values?.() || [])].reduce((a,b)=>a+b, 0);
+        }
+      }
+      const state = making > 0     ? 'instantiated'
+                  : cult   > 0     ? 'unknown'
+                  :                  'never_set';
+      self.postMessage({ id, result: { cultivating_count: cult, making_count: making, state } });
     } else if (op === 'nul_state_for_slot') {
       // Resolve the structural NUL state for a named slot (never_set /
       // unknown / cleared / active) from integral history. Used by main-
