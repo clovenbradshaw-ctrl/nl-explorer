@@ -109,6 +109,14 @@ function fold(entry, record = true) {
   }
 
   self.postMessage({ op: 'm_update', anchor: entry.anchor, entry });
+  // Live ticker feed — main-thread ring buffer (see renderStats area)
+  // only listens for this message so we don't flood the UI with
+  // every SIG/SEG/NUL entry. INS/DEF/EVA/REC are the operators whose
+  // arrival is interesting to a reader watching the learning loop.
+  if (entry.op === 'INS' || entry.op === 'DEF' ||
+      entry.op === 'EVA' || entry.op === 'REC') {
+    try { self.postMessage({ op: 'fold_event', entry }); } catch {}
+  }
 }
 
 function foldINS(entry) {

@@ -261,8 +261,105 @@ button:hover { border-color: var(--sig); color: var(--sig); }
 }
 .worker-ind.worker-off { color: #71717a; border: 1px solid #52525b; opacity: 0.6; }
 .worker-ind.worker-on  { color: #4e8f62; border: 1px solid #4e8f62; }
-.anno { transition: background 120ms ease, box-shadow 180ms ease; cursor: pointer; }
+/* Dormant highlights — prose reads as prose by default, annotations
+   activate on hover or when focused. `.anno` wrappers are already
+   restricted to displayable entities by the rendering-boundary gate
+   (buildAnnotatedHTML), so hover surfaces real content only. */
+.anno {
+  background: transparent !important;
+  border-radius: 2px;
+  padding: 0 1px;
+  border-bottom: 1.5px solid rgba(255,255,255,0.08);
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 180ms ease;
+  cursor: pointer;
+}
+.anno-ins { border-bottom-color: rgba(78,143,98,0.35); }
+.anno-sig { border-bottom-color: rgba(251,191,36,0.30); }
+.anno-con { border-bottom-color: rgba(184,118,50,0.30); }
+.anno-def { border-bottom-color: rgba(34,211,238,0.30); }
+.anno-eva { border-bottom-color: rgba(167,139,250,0.30); }
+.anno-nul { border-bottom-color: rgba(248,113,113,0.30); }
+.anno-rec { border-bottom-color: rgba(244,114,182,0.30); }
+.anno-syn { border-bottom-color: rgba(138,106,154,0.30); }
+.anno-focus,
+.anno:hover,
+.anno.anno-active {
+  background: rgba(196,129,58,0.18) !important;
+  border-bottom-color: rgba(196,129,58,0.9);
+}
 .anno-active { outline: 1px solid var(--sig); }
+
+/* Dynamic corpus header — compact, above the doc viewer. */
+.corpus-header {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--muted, #8a8f98);
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border2, #2a2d38);
+  letter-spacing: 0.02em;
+}
+.corpus-header .ch-title { color: var(--text, #e8ecf5); }
+.corpus-header .ch-sep   { opacity: 0.5; margin: 0 6px; }
+
+/* EVA calibration notice — honest rendering of low-confidence EVA. */
+.eva-notice {
+  background: rgba(167,139,250,0.08);
+  border-left: 3px solid rgba(167,139,250,0.6);
+  padding: 6px 10px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--text, #e8ecf5);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.eva-notice .en-headline { color: rgba(167,139,250,0.95); font-weight: 500; }
+.eva-notice .en-detail   { color: var(--muted, #8a8f98); }
+.eva-notice button {
+  background: transparent;
+  border: 1px solid rgba(167,139,250,0.4);
+  color: rgba(167,139,250,0.9);
+  padding: 3px 8px;
+  font-size: 10px;
+  font-family: inherit;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.eva-notice button:hover { background: rgba(167,139,250,0.15); }
+.eva-notice .en-dismiss { color: var(--muted, #8a8f98); border-color: var(--border2, #2a2d38); }
+
+/* Live operator ticker — fold events stream in here. */
+.op-ticker {
+  background: rgba(20,20,24,0.6);
+  border-top: 1px solid var(--border2, #2a2d38);
+  border-bottom: 1px solid var(--border2, #2a2d38);
+  max-height: 80px;
+  overflow-y: auto;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  padding: 4px 10px;
+}
+.op-ticker .tk-row {
+  color: var(--text, #e8ecf5);
+  opacity: 1;
+  transition: opacity 600ms ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.op-ticker .tk-row.tk-faded { opacity: 0.25; }
+.op-ticker:hover .tk-row { opacity: 1 !important; }
+.op-ticker .tk-op {
+  display: inline-block;
+  width: 38px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+.op-ticker .tk-op-INS { color: #4e8f62; }
+.op-ticker .tk-op-DEF { color: #22d3ee; }
+.op-ticker .tk-op-EVA { color: #a78bfa; }
+.op-ticker .tk-op-REC { color: #f472b6; }
+.op-ticker .tk-verb { color: var(--muted, #8a8f98); margin-right: 6px; }
+.op-ticker .tk-subj { color: var(--text, #e8ecf5); }
 
 /* Structural grain cells — every word/clause/sentence/paragraph/section/
    document is a clickable hit target. Default has no decoration so plain
@@ -1405,6 +1502,21 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
         <!-- tabs added per processed doc -->
       </div>
 
+      <!-- Dynamic corpus header — `renderCorpusHeader()` fills this after
+           each ingest. Filtered entity count uses `isDisplayableEntity`. -->
+      <div class="corpus-header" id="corpus-header" style="display:none;"></div>
+
+      <!-- EVA calibration notice strip — surfaces when flat-rate
+           (confidence_gap < 0.08) exceeds 50% across classified
+           clauses. Auto-dismisses when flat-rate drops below 30%. -->
+      <div class="eva-notice" id="eva-notice" style="display:none;"></div>
+
+      <!-- Live operator ticker — fold-worker emits fold_event for
+           INS/DEF/EVA/REC and the main thread maintains a 20-entry
+           ring buffer here. Lines fade after ~4s; scrollable on
+           hover so a reader can pause and catch up. -->
+      <div class="op-ticker" id="op-ticker" style="display:none;"></div>
+
       <div class="doc-area" id="doc-area">
         <div class="drop-zone visible" id="drop-zone" onclick="document.getElementById('file-input').click()">
           <div class="drop-zone-icon">⬇</div>
@@ -2401,6 +2513,14 @@ const DETS = new Set([
   'what','which','whose','whatever','whichever',
 ]);
 
+// Sentence-starter adverbs that commonly appear capitalised mid-
+// sentence without being proper nouns. Prevents "However" and
+// "Further" from being promoted to entity candidates.
+const SENT_STARTERS = new Set([
+  'however','further','thus','moreover','therefore',
+  'nevertheless','nonetheless','additionally','furthermore',
+]);
+
 // PRONOUNS / REFRAME_RE / ABSENCE_RE now per-script — see PRONOUN_PATTERNS etc above
 const PRONOUNS = /\b(he|him|his|she|her|hers|it|its|they|them|their|theirs|we|us|our)\b/gi; // Latin fallback
 
@@ -2413,6 +2533,19 @@ const ABSENCE_RE = /\b(no record|not found|undisclosed|unaccounted|missing|not r
 function cleanText(text) {
   // fi ligature artifact: "Grif fi n" → "Griffin", "of fi ce" → "office"
   text = text.replace(/(\w+)\s+fi\s+(\w+)/g, '$1fi$2');
+  // Residual 1–2 char fragments: "s elf-organized" → "self-organized",
+  // "Polyce ntric" → "Polycentric". Position-aware PDF reconstruction
+  // catches most of this at source; this handles post-extraction
+  // artifacts. Skip real short English words so "is large" doesn't
+  // become "islarge".
+  const _FRAG_SKIP = new Set([
+    'a','i','o','an','as','at','be','by','do','go','he','if','in','is',
+    'it','me','my','no','of','on','or','so','to','up','us','we',
+  ]);
+  text = text.replace(/\b([A-Za-z]{1,2})\s+([a-z]{3,})\b/g, (m, a, b) => {
+    if (_FRAG_SKIP.has(a.toLowerCase())) return m;
+    return a + b;
+  });
   // Wikipedia citation brackets
   text = text.replace(/\[\d+\]/g, '');
   // "Retrieved [date]" patterns
@@ -2459,8 +2592,12 @@ function tagToken(clean, prevClean, sentStart) {
   if (/^[A-Z][A-Z0-9]{1,}$/.test(clean)) return 'PROPER';
   // Alphanumeric code: SB11720, HB2085, COVID-19
   if (/^[A-Z]{1,3}\d+/.test(clean)) return 'PROPER';
-  // Mid-sentence capital
-  if (/^[A-Z]/.test(clean) && !sentStart && !DETS.has(wl)) return 'PROPER';
+  // Mid-sentence capital — only promote to PROPER when it's long
+  // enough to carry content and not a common sentence-starter
+  // adverb (which would otherwise pull "However" / "Further" into
+  // entity candidates).
+  if (/^[A-Z]/.test(clean) && !sentStart && !DETS.has(wl) &&
+      clean.length >= 3 && !SENT_STARTERS.has(wl)) return 'PROPER';
   // Determiner
   if (DETS.has(wl)) return 'DET';
   // Hard stop words
@@ -2506,6 +2643,7 @@ function extractNPs(text) {
 
       // Consume content tokens (PROPER NOUN NUM) with 'of' bridges
       let hadContent = false;
+      let hadProper = false;
       let tokenCount = 0;
       const MAX_NP_TOKENS = 9;
       while (j < tokens.length) {
@@ -2516,6 +2654,7 @@ function extractNPs(text) {
         if (tg === 'PROPER' || tg === 'NOUN' || tg === 'NUM') {
           npToks.push(t);
           hadContent = true;
+          if (tg === 'PROPER') hadProper = true;
           tokenCount++;
           j++;
         } else if (t.clean.toLowerCase() === 'of' && j+1 < tokens.length) {
@@ -2542,6 +2681,10 @@ function extractNPs(text) {
               normalized: norm,
               start: npToks[0].start,
               end: npToks[npToks.length-1].end,
+              // Flag single-NOUN-only candidates so the downstream
+              // SIG stage can apply a stricter freq/z gate to them
+              // without suppressing proper-noun candidates.
+              allNounFallback: !hadProper,
             });
           }
         }
@@ -2560,6 +2703,55 @@ function normalizeNP(text) {
 
 function toDisplayName(norm) {
   return norm.replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// ── Quality gates at the rendering boundary ─────────────────
+// `isDisplayableEntity` is the single predicate that decides whether
+// an entity name is worth showing in the UI at all. Hides citations,
+// DOIs, figure/table refs, URLs, over-long phrases, and all-stopword
+// clusters. Toggle a filter off by removing its line — this is the
+// only place entity display quality is enforced.
+const DISPLAY_GERUNDS = new Set([
+  'using','understanding','well','studies','article',
+]);
+function isDisplayableEntity(anchorOrName) {
+  if (!anchorOrName) return false;
+  let name = anchorOrName;
+  if (typeof anchorOrName === 'string' && anchorOrName.startsWith('@')) {
+    try { name = resolveDisplayName(anchorOrName) || ''; } catch { name = ''; }
+  } else if (typeof anchorOrName === 'string' && /^np:/.test(anchorOrName)) {
+    name = anchorOrName.slice(3);
+  }
+  if (!name || typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  if (trimmed.length === 0 || trimmed.length > 60) return false;
+  const tokens = trimmed.split(/\s+/);
+  if (tokens.length > 5) return false;
+  if (/\S+@\S+\.\S+/.test(trimmed)) return false;
+  if (/10\.\d{4,}\//.test(trimmed)) return false;
+  if (/\b(?:fig|figure|table|p|pp|§)\.?\s*\d+/i.test(trimmed)) return false;
+  if (/https?:\/\//.test(trimmed)) return false;
+  const stopSet = (typeof STOP !== 'undefined') ? STOP : new Set();
+  const allJunk = tokens.every(t => {
+    const lt = t.toLowerCase();
+    return stopSet.has(lt) || DISPLAY_GERUNDS.has(lt);
+  });
+  if (allJunk) return false;
+  return true;
+}
+
+// `hasPredicate` decides whether a CON entry represents a real
+// directed relationship. Plain co-occurrence is the precondition for
+// a relationship, not a relationship itself — graphs built from
+// co-occurrence alone produce noise. Only verb_cooccurrence / SPO /
+// coref-style edges carry structural meaning.
+function hasPredicate(con) {
+  if (!con || !con.operand) return false;
+  const rel = con.operand.relation_type;
+  if (con.operand.verb && con.operand.verb !== '?' && con.operand.verb !== null) return true;
+  if (con.operand.predicate) return true;
+  if (rel && rel !== 'co-occurrence') return true;
+  return false;
 }
 
 // ── Clustering ────────────────────────────────────────
@@ -2775,10 +2967,22 @@ function stageSIG_NPs(log, text, da) {
     const ca     = anchor('np:' + cluster.canonical);
     const conf   = Math.min(0.4 + count * 0.06, 0.95);
 
-    // Individual SIG per occurrence
+    // NP quality gate: if every surface form is a single-token NOUN
+    // fallback (no proper-noun evidence anywhere in the cluster),
+    // only keep it if it is repeated often enough to carry weight on
+    // its own (freq ≥ 4 and z ≥ 1.0). This kills the flood of common-
+    // noun SIGs that otherwise crowd the rail.
+    const allFallback = cluster.members.every(m => m.allNounFallback);
+    const singleToken = !cluster.canonical.includes(' ');
+    if (allFallback && singleToken && (count < 4 || zScore < 1.0)) {
+      continue;
+    }
+
+    // Individual SIG per occurrence — target the entity-candidate anchor
+    // (np:<canonical>) so SIGs fold into a cluster, not into the doc.
     for (const np of cluster.members) {
       const a = anchor('sig:' + np.text + ':' + np.start);
-      log.push(makeEntry('SIG', a, `doc:${da}`, {
+      log.push(makeEntry('SIG', a, ca, {
         text: np.text,
         normalized: cluster.canonical,
         detector: 'NP',
@@ -2793,9 +2997,11 @@ function stageSIG_NPs(log, text, da) {
       }));
     }
 
-    // Accumulation SIG — threshold crossing
-    if (count >= 2) {
-      log.push(makeEntry('SIG', anchor('acc:'+ca), ca, {
+    // Accumulation SIG — one per cluster against the doc anchor as a
+    // summary signal. Gate raised: z > 1.0 and canonical ≤ 6 tokens to
+    // suppress junk-entity promotion via count alone.
+    if (count >= 2 && zScore > 1.0 && cluster.canonical.split(' ').length <= 6) {
+      log.push(makeEntry('SIG', anchor('acc:'+ca), `doc:${da}`, {
         text: cluster.canonical,
         detector: 'ACCUMULATION',
         sig_count: count,
@@ -2817,6 +3023,7 @@ function stageSIG_pronouns(log, text, da) {
     const a = anchor('pron:' + m[0].toLowerCase() + ':' + m.index);
     log.push(makeEntry('SIG', a, `doc:${da}`, {
       text: m[0],
+      surface_form: m[0],
       detector: 'PRONOUN',
       resolution_status: 'unresolved',
       candidate_op: 'CON',
@@ -2852,8 +3059,19 @@ function stageSIG_reframe(log, text, da) {
   }
 }
 
-function stageINS_threshold(log, clusters, mean, sd, da) {
-  const threshold = Math.max(3, mean + 1.0 * sd);
+function stageINS_threshold(log, clusters, mean, sd, da, text) {
+  // Doc-length-aware floor. On long documents, a flat floor of 3
+  // promotes dozens of incidental nouns that happen to recur; raise
+  // the baseline for anything above 5k words and nudge the σ gate
+  // up so the chosen entities stand out, not just show up. The
+  // architecturally correct fix is to remove this stage entirely
+  // and let the fold worker's integral-crossing path own INS — the
+  // threshold raise is the safe interim.
+  const wordCount = (typeof text === 'string')
+    ? text.trim().split(/\s+/).length
+    : 0;
+  const floor = wordCount > 5000 ? 5 : 3;
+  const threshold = Math.max(floor, mean + 1.2 * sd);
   const entityAnchors = {};
 
   for (const cluster of clusters) {
@@ -2953,39 +3171,61 @@ function stageINS_definitions(log, defSyntax, entityAnchors, da) {
 }
 
 function findVerbBetween(sentText, normA, normB) {
-  // Find approximate positions of each entity in the sentence
-  const ia = sentText.toLowerCase().indexOf(normA.split(' ')[0]);
-  const ib = sentText.toLowerCase().indexOf(normB.split(' ')[0]);
-  if (ia < 0 || ib < 0) return null;
-  const start = Math.min(ia, ib) + Math.min(normA.length, normB.length);
+  // Positions come from lowercased sentText but we slice the
+  // original-case string, so verb matching sees real verbs. The prior
+  // impl lowercased sentText before slicing, causing positions to land
+  // mid-word and the verb extractor to miss or mis-hit every time.
+  const lower  = sentText.toLowerCase();
+  const aFirst = normA.split(' ')[0];
+  const bFirst = normB.split(' ')[0];
+  const ia = lower.indexOf(aFirst.toLowerCase());
+  const ib = lower.indexOf(bFirst.toLowerCase());
+  if (ia < 0 || ib < 0 || ia === ib) return null;
+  const start = Math.min(ia, ib) + Math.max(aFirst.length, bFirst.length);
   const end   = Math.max(ia, ib);
   if (start >= end) return null;
   const between = sentText.slice(start, end);
-  // Match first lowercase verb-like token (not a noun by endings)
-  const m = between.match(/([a-z]{3,}(?:ed|ing|s|es)?)/i);
+  const m = between.match(
+    /\b(received|transferred|authorized|allocated|approved|declined|reported|stated|argued|demonstrated|showed|found|established|enabled|challenged|requires?|provides?|supports?|defines?|represents?|indicates?|\w+(?:ed|ing))\b/i
+  );
   if (!m) return null;
   const w = m[1].toLowerCase();
-  // Filter obvious non-verbs
   if (STOP.has(w)) return null;
-  if (/(?:tion|ment|ness|ity|ance|ence|ship)$/.test(w)) return null;
+  if (/(?:tion|ment|ness|ity|ance|ence)$/.test(w)) return null;
   return m[1];
 }
 
 function stageCON_cooccurrence(log, sentences, entityAnchors, da) {
+  // O(s·m) rewrite: build one regex union over all canonicals and
+  // scan each sentence once. The prior impl ran a separate regex
+  // per entity per sentence (O(s·m²)), which dominated ingest time
+  // on multi-thousand-entity corpora.
+  const norms = Object.keys(entityAnchors);
+  if (norms.length === 0) return;
+  const pattern = norms
+    .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .sort((a, b) => b.length - a.length) // longer first — match most specific
+    .join('|');
+  const unionRe = new RegExp('\\b(' + pattern + ')\\b', 'gi');
+
   for (const sent of sentences) {
     const lower = sent.text.toLowerCase();
-    const present = [];
-    for (const [norm, ca] of Object.entries(entityAnchors)) {
-      // Check if this normalized form appears in the sentence
-      const re = new RegExp('\\b' + norm.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '\\b','i');
-      if (re.test(lower)) present.push({ norm, ca });
+    const seen = new Map(); // norm → true (dedup within-sentence)
+    let m;
+    unionRe.lastIndex = 0;
+    while ((m = unionRe.exec(lower)) !== null) {
+      const norm = m[1].toLowerCase();
+      if (entityAnchors[norm] && !seen.has(norm)) {
+        seen.set(norm, true);
+      }
     }
-    if (present.length < 2) continue;
+    if (seen.size < 2) continue;
+    const present = [...seen.keys()].map(norm => ({ norm, ca: entityAnchors[norm] }));
 
     for (let i = 0; i < present.length; i++) {
-      for (let j = i+1; j < present.length; j++) {
+      for (let j = i + 1; j < present.length; j++) {
         const a = present[i], b = present[j];
-        const ca = anchor('cooc:'+a.ca+':'+b.ca+':'+sent.start);
+        const ca = anchor('cooc:' + a.ca + ':' + b.ca + ':' + sent.start);
         const verb = findVerbBetween(sent.text, a.norm, b.norm);
         log.push(makeEntry('CON', ca, a.ca, {
           object_anchor: b.ca,
@@ -3035,6 +3275,22 @@ function stageEVA_temporal(log, text, da) {
 // ── Frame DEF: structural hypothesis after CON+SYN ───────────────────────────
 // Called after CON and SYN. Records the entity's CON neighborhood as a
 // testable frame — what the entity structurally is at this point in evidence.
+function buildFrameLabel(canonical, neighborAnchors, relationTypes) {
+  const relStr = relationTypes.length > 0
+    ? `via ${relationTypes.slice(0, 2).join(', ')}`
+    : 'by co-occurrence';
+  const nbNames = [...neighborAnchors]
+    .slice(0, 3)
+    .map(a => {
+      try { return resolveDisplayName(a) || a; }
+      catch { return a; }
+    });
+  const nbStr = nbNames.length > 0
+    ? `related to ${nbNames.join(', ')}`
+    : 'no structural neighbors yet';
+  return `${toDisplayName(canonical)}: ${nbStr} ${relStr}`;
+}
+
 function stageFrameDEF(log, entityAnchors, da) {
   const entries = log.entries();
   const allCons = entries.filter(e => e.op === 'CON');
@@ -3064,6 +3320,7 @@ function stageFrameDEF(log, entityAnchors, da) {
     log.push(makeEntry('DEF', anchor('def:frame:' + ca + ':' + da), ca, {
       param:          'frame',
       value:          frameHash,
+      frame_label:    buildFrameLabel(norm, neighbors, relationTypes),
       neighbor_count: neighbors.size,
       neighbor_set:   neighborList,
       relation_types: relationTypes,
@@ -3458,6 +3715,29 @@ async function stageEmbeddingClassify(log, da) {
       }
     ));
   }
+
+  // Calibration check — if ≥60% of the first ~100 clauses classify flat
+  // (confidence_gap < 0.08), centroids are not discriminating this
+  // domain. Emit a DEF so the UI can surface an honest warning strip
+  // (see EVA notice strip, Layer 1.3).
+  const sample = results.slice(0, Math.min(100, results.length));
+  if (sample.length >= 10) {
+    const flat = sample.filter(r => (r.confidence_gap ?? 0) < 0.08).length;
+    const flatRate = flat / sample.length;
+    if (flatRate > 0.60) {
+      log.push(makeEntry('DEF',
+        anchor('def:classifier_mode:' + da),
+        da,
+        {
+          param: 'classifier_mode',
+          value: 'flat_profile_detected',
+          flat_rate: parseFloat(flatRate.toFixed(3)),
+          note: `${Math.round(flatRate * 100)}% flat profiles — centroid undiscriminating for this corpus`,
+        },
+        { source: 'mechanical:calibration_check', doc_anchor: da, confidence: 1.0 }
+      ));
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -3635,6 +3915,8 @@ async function ingest(text, title, source, log) {
   setStage('SEG · segmenting');
   const sentences = stageSEG(log, text, da);
   stageSEG_structure(log, text, da);
+  const _segClauses = log.byOp('SEG').filter(e => e.operand?.type === 'clause').length;
+  setStage(`SEG · ${sentences.length} sentences · ${_segClauses} clauses`);
   await yieldTick();
 
   // 3. SIG — NP extraction (universal), pronouns, reframe signals
@@ -3642,6 +3924,13 @@ async function ingest(text, title, source, log) {
   const { clusters, mean, sd } = stageSIG_NPs(log, text, da);
   stageSIG_pronouns(log, text, da);
   stageSIG_reframe(log, text, da);
+  // Report per-stage counts so the progress overlay shows concrete
+  // evidence of what the pipeline is finding, not just stage names.
+  const _npQualify = clusters.filter(c => {
+    const z = (c.members.length - mean) / (sd || 1);
+    return z > 1.0;
+  }).length;
+  setStage(`SIG · ${clusters.length} NP clusters (${_npQualify} qualify z>1.0 gate)`);
   await yieldTick();
 
   // 4. Detect explicit definition syntax
@@ -3649,7 +3938,11 @@ async function ingest(text, title, source, log) {
 
   // 5. INS — threshold-based entity instantiation
   setStage('INS · entities');
-  const entityAnchors = stageINS_threshold(log, clusters, mean, sd, da);
+  const entityAnchors = stageINS_threshold(log, clusters, mean, sd, da, text);
+  const _insCount = Object.keys(entityAnchors).length;
+  const _insVisible = Object.keys(entityAnchors)
+    .filter(n => isDisplayableEntity('np:' + n)).length;
+  setStage(`INS · ${_insCount} entities promoted (${_insVisible} after quality filter)`);
   await yieldTick();
 
   // 6. INS + DEF — explicitly defined terms (even below threshold)
@@ -3658,7 +3951,12 @@ async function ingest(text, title, source, log) {
 
   // 7. CON — sentence-level co-occurrence + heuristic SPO (Phase 4 tier 1)
   setStage('CON · co-occurrence');
+  const _conBefore = log.byOp('CON').length;
   stageCON_cooccurrence(log, sentences, entityAnchors, da);
+  const _conAfter = log.byOp('CON').length;
+  const _conEdges = log.byOp('CON');
+  const _predEdges = _conEdges.filter(c => typeof hasPredicate === 'function' ? hasPredicate(c) : false).length;
+  setStage(`CON · ${_predEdges} predicate edges · ${(_conAfter - _conBefore) - _predEdges} co-occurrences`);
   try {
     const llmQueue = stageSPO(log, sentences, entityAnchors, da);
     // Stash the LLM queue on the log for optional later processing. The
@@ -3693,6 +3991,24 @@ async function ingest(text, title, source, log) {
   // 11. NUL — absence signals
   setStage('NUL · absence');
   stageNUL(log, text, da);
+
+  // Surface classifier state explicitly so users don't wonder where
+  // EVA went. Three-way: ready / unavailable / flat-profiles. The
+  // flat-profile branch is driven by the calibration DEF emitted in
+  // stageEmbeddingClassify when centroids don't discriminate.
+  try {
+    const flatDef = log.entries().find(e =>
+      e.op === 'DEF' && e.operand?.param === 'classifier_mode' &&
+      e.operand?.value === 'flat_profile_detected');
+    if (flatDef) {
+      const pct = Math.round((flatDef.operand.flat_rate || 0) * 100);
+      setStage(`EMBED · ${pct}% flat profiles — centroids undiscriminating for this domain`);
+    } else if (window.EOClassifier && window.EOClassifier.isReady()) {
+      setStage('EMBED · Xenova/all-MiniLM-L6-v2 · 384d · ready');
+    } else {
+      setStage('EMBED · classifier unavailable — skipping');
+    }
+  } catch {}
 
   return { log, doc_anchor: da };
 }
@@ -4410,6 +4726,9 @@ async function initWorkers() {
         try { surfaceRECCandidate(e.data.anchor, e.data.rec); } catch {}
       } else if (op === 'm_update') {
         workerBridge.mUpdates++;
+        try { onFoldMUpdate(e.data.anchor, e.data.entry); } catch {}
+      } else if (op === 'fold_event') {
+        try { pushTickerEvent(e.data.entry); } catch {}
       }
     };
     w.onerror = (err) => console.warn('worker error:', err?.message || err);
@@ -4655,13 +4974,21 @@ function buildAnnotatedHTML(rawText, meta, spans, activeSpanId, zoomGrain, docAn
   // Partition incoming spans. SEG spans (with a known seg_type in the
   // ladder) become structural grain wrappers; everything else is an
   // operator annotation layer painted inside the structural skeleton.
+  // Entity-typed annos (INS/SIG/CON/DEF/EVA/REC) are gated by
+  // `isDisplayableEntity` so the rendering boundary does the quality
+  // filtering, not the source log. NUL/SYN pass through — they don't
+  // target an entity name.
   const structural = [];
   const annos = [];
+  const _entityGate = typeof isDisplayableEntity === 'function' ? isDisplayableEntity : (() => true);
   for (const s of spans) {
     if (s.op === 'SEG' && s.seg_type && _GRAIN_DEPTH[s.seg_type] != null) {
       structural.push({ ...s, _kind: 'grain', _grain: s.seg_type,
                         _priority: _GRAIN_DEPTH[s.seg_type] });
     } else if (s.op !== 'SEG') {
+      const entityAnchor = s.entity_anchor || s.anchor || null;
+      const opNeedsEntity = ['INS','SIG','CON','DEF','EVA','REC'].includes(s.op);
+      if (opNeedsEntity && entityAnchor && !_entityGate(entityAnchor)) continue;
       annos.push({ ...s, _kind: 'anno', _priority: 10 });
     }
   }
@@ -5281,10 +5608,75 @@ function resolveDisplayName(entityAnchor) {
   return cn ? cn.operand.value : entityAnchor.slice(0, 16);
 }
 
+// ── Corpus header + EVA calibration notice ─────────────────────────
+// Honest rendering: the header reports filtered entity counts (not
+// raw INS), and the EVA strip surfaces when centroids are
+// undiscriminating so users aren't misled by confident-looking UI
+// built on low-confidence classification.
+function renderCorpusHeader() {
+  const el = document.getElementById('corpus-header');
+  if (!el) return;
+  if (!state.docs || state.docs.length === 0) { el.style.display = 'none'; return; }
+  const docCount = state.docs.length;
+  let entityCount = 0;
+  try {
+    if (state.combined) {
+      const seen = new Set();
+      for (const e of state.combined.entries()) {
+        if (e.op !== 'INS') continue;
+        if (e.target !== 'entity-registry' && !(typeof e.anchor === 'string' && e.anchor.startsWith('np:'))) continue;
+        if (seen.has(e.anchor)) continue;
+        if (isDisplayableEntity(e.anchor)) { seen.add(e.anchor); entityCount++; }
+      }
+    }
+  } catch {}
+  const active = state.docs[state.activeDoc] || state.docs[0];
+  const title = active?.title || 'untitled';
+  el.style.display = 'block';
+  el.innerHTML =
+    `corpus: <span class="ch-title">${escapeHtml(title)}</span>` +
+    `<span class="ch-sep">·</span>${docCount} doc${docCount !== 1 ? 's' : ''}` +
+    `<span class="ch-sep">·</span>${entityCount} entit${entityCount === 1 ? 'y' : 'ies'}`;
+}
+
+let _evaNoticeDismissed = false;
+function renderEVANotice() {
+  const el = document.getElementById('eva-notice');
+  if (!el) return;
+  if (_evaNoticeDismissed) { el.style.display = 'none'; return; }
+  if (!state.combined) { el.style.display = 'none'; return; }
+  const evas = state.combined.entries().filter(e =>
+    e.op === 'EVA' && e.operand?.eva_type === 'embedding_classification'
+  );
+  if (evas.length < 10) { el.style.display = 'none'; return; }
+  const flat = evas.filter(e => (e.operand?.confidence_gap ?? 0) < 0.08).length;
+  const rate = flat / evas.length;
+  // Hide if below 30% (auto-dismiss region) or above 50% (trigger zone).
+  if (rate < 0.30) { el.style.display = 'none'; return; }
+  if (rate < 0.50) { el.style.display = 'none'; return; }
+  el.style.display = 'flex';
+  const h3Avail = typeof window.runH3Tiebreak === 'function';
+  el.innerHTML =
+    `<span class="en-headline">Cell classification confidence is low for this corpus.</span>` +
+    `<span class="en-detail">${flat} of ${evas.length} clauses below threshold (gap &lt; 0.08). Current centroids don't discriminate this domain.</span>` +
+    `<button ${h3Avail ? 'onclick="runH3Tiebreak()"' : 'title="not yet implemented"'}>Run H3 tiebreak pass</button>` +
+    `<button class="en-dismiss" onclick="dismissEVANotice()">Dismiss</button>`;
+}
+function dismissEVANotice() {
+  _evaNoticeDismissed = true;
+  const el = document.getElementById('eva-notice');
+  if (el) el.style.display = 'none';
+}
+if (typeof window !== 'undefined') {
+  window.dismissEVANotice = dismissEVANotice;
+}
+
 function renderAll() {
   renderTabs();
   renderLog();
   renderStats();
+  try { renderCorpusHeader(); } catch {}
+  try { renderEVANotice(); } catch {}
   document.getElementById('btn-download').style.display = 'inline';
   // If pressure tab is visible, refresh it
   if (document.getElementById('pressure-map').classList.contains('visible')) {
@@ -5618,6 +6010,82 @@ function entryMainText(e) {
   return JSON.stringify(e.operand).slice(0, 80);
 }
 
+// ── Live operator ticker ──────────────────────────────────────────
+// Ring buffer of the last 20 INS/DEF/EVA/REC events emitted by the
+// fold worker. Makes the learning loop visible: DEF built "polycentric"
+// → governance form, EVA clauses classifying into cells, etc.
+const _TICKER_MAX = 20;
+const _tickerRing = [];
+const _tickerFadeTimers = new WeakMap();
+function _tickerNarration(entry) {
+  const op = entry.op;
+  if (op === 'INS') {
+    const name = (typeof resolveDisplayName === 'function'
+      ? resolveDisplayName(entry.anchor) : null) || entry.anchor;
+    return { verb: 'promoted', subj: name };
+  }
+  if (op === 'DEF') {
+    const param = entry.operand?.param || 'def';
+    const name = (typeof resolveDisplayName === 'function'
+      ? resolveDisplayName(entry.target) : null) || entry.target;
+    const label = entry.operand?.frame_label
+      || (typeof entry.operand?.value === 'string' ? entry.operand.value : param);
+    return { verb: `built ${param}`, subj: `${name} → ${String(label).slice(0, 60)}` };
+  }
+  if (op === 'EVA') {
+    const kind = entry.operand?.eva_type || 'eva';
+    const result = entry.operand?.result || entry.operand?.operator || '';
+    return { verb: kind, subj: result || '(classified)' };
+  }
+  if (op === 'REC') {
+    const trig = entry.operand?.trigger || 'reconsider';
+    return { verb: trig, subj: entry.operand?.note?.slice(0, 60) || '(candidate)' };
+  }
+  return { verb: op.toLowerCase(), subj: entry.anchor };
+}
+function pushTickerEvent(entry) {
+  if (!entry || !entry.op) return;
+  const el = document.getElementById('op-ticker');
+  if (!el) return;
+  const { verb, subj } = _tickerNarration(entry);
+  _tickerRing.push({ op: entry.op, verb, subj, ts: Date.now() });
+  while (_tickerRing.length > _TICKER_MAX) _tickerRing.shift();
+  el.style.display = 'block';
+  el.innerHTML = _tickerRing.map(r =>
+    `<div class="tk-row"><span class="tk-op tk-op-${r.op}">${r.op}</span>` +
+    `<span class="tk-verb">${escapeHtml(r.verb)}</span>` +
+    `<span class="tk-subj">${escapeHtml(r.subj)}</span></div>`
+  ).join('');
+  // Fade the oldest visible row after 4s; hover pauses the fade via CSS.
+  const rows = el.querySelectorAll('.tk-row');
+  rows.forEach((r, i) => {
+    const age = Date.now() - _tickerRing[i].ts;
+    if (age > 4000) r.classList.add('tk-faded');
+    else {
+      setTimeout(() => { r.classList.add('tk-faded'); }, 4000 - age);
+    }
+  });
+  el.scrollTop = el.scrollHeight;
+}
+
+// Entity profile card auto-refresh hook — called from worker
+// `m_update` dispatch. When an entry lands for the currently focused
+// anchor, re-render the inspector so the profile card visibly fills
+// in as the system reads.
+function onFoldMUpdate(anchor, _entry) {
+  if (!anchor) return;
+  try {
+    if (typeof _inspectAnchor !== 'undefined' && _inspectAnchor === anchor
+        && typeof renderInspector === 'function') {
+      renderInspector();
+    }
+  } catch {}
+}
+if (typeof window !== 'undefined') {
+  window.pushTickerEvent = pushTickerEvent;
+  window.onFoldMUpdate   = onFoldMUpdate;
+}
+
 function renderStats() {
   if (!state.combined) return;
   const ops = ['INS','SEG','SIG','CON','SYN','EVA','NUL','DEF','REC'];
@@ -5833,11 +6301,37 @@ async function parsePDF(file) {
       `Parsing PDF page ${i}/${pdf.numPages}…`;
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    const pageText = content.items
-      .map(item => item.str)
-      .join(' ')
-      .replace(/  +/g, ' ')
-      .trim();
+
+    // Position-aware join: the naive `.join(' ')` approach scrambles
+    // word boundaries because pdf.js ships every glyph run as a
+    // separate item. Group items by baseline y (transform[5]), sort
+    // by x (transform[4]), and insert a space only when the gap
+    // between glyph runs exceeds 0.3× font height. Collapses
+    // "J un E 2010" → "June 2010" at the source.
+    const lines = new Map();
+    for (const item of content.items) {
+      if (!item.transform) continue;
+      const y = Math.round(item.transform[5]);
+      if (!lines.has(y)) lines.set(y, []);
+      lines.get(y).push({
+        x:     item.transform[4],
+        width: item.width || 0,
+        str:   item.str,
+        height: item.height || 10,
+      });
+    }
+    const sortedY = [...lines.keys()].sort((a, b) => b - a); // top → bottom
+    const lineTexts = sortedY.map(y => {
+      const lineItems = lines.get(y).sort((a, b) => a.x - b.x);
+      let text = '', prevEnd = null;
+      for (const it of lineItems) {
+        if (prevEnd !== null && (it.x - prevEnd) > (it.height * 0.3)) text += ' ';
+        text += it.str;
+        prevEnd = it.x + it.width;
+      }
+      return text.trim();
+    }).filter(Boolean);
+    const pageText = lineTexts.join('\n').replace(/  +/g, ' ').trim();
     if (pageText) pages.push(pageText);
   }
   return pages.join('\n\n');
@@ -7340,7 +7834,7 @@ function escapeHtml(str) {
   <div class="sep"></div>
   <div class="hdr-title">Document Store</div>
   <div class="sep"></div>
-  <div class="mono-sm">corpus: nashville-surveillance-beat · 4 docs · 28 spans</div>
+  <div class="mono-sm" id="demo-corpus-label">corpus: nashville-surveillance-beat · 4 docs · 28 spans</div>
   <div class="hdr-right">
     <div class="dot"></div>
     <div class="mono-sm">INDEXED</div>
@@ -7954,8 +8448,27 @@ function rEvLog(){
 // ═══════════════════════════════════════════════════
 function rGraph(){
   const svg=document.getElementById('gsvg');
-  document.getElementById('gcnt').textContent=`${GNODES.length} nodes · ${GEDGES.length} edges`;
-  const edges=GEDGES.map(ed=>{
+  // Predicate-required filter — co-occurrence alone is the
+  // precondition for a relationship, not a relationship itself. Only
+  // edges that carry a verb / predicate / non-co-occurrence relation
+  // type survive. If none do, render an honest empty state.
+  const filteredEdges = GEDGES.filter(ed => {
+    if (typeof hasPredicate === 'function' && ed && ed.operand) {
+      return hasPredicate(ed);
+    }
+    // Legacy demo edges without operand metadata are treated as
+    // predicate-bearing so the demo shell still renders something.
+    return true;
+  });
+  document.getElementById('gcnt').textContent=`${GNODES.length} nodes · ${filteredEdges.length} edges`;
+  if (filteredEdges.length === 0) {
+    svg.innerHTML = `<rect width="270" height="230" fill="transparent"/>` +
+      `<text x="135" y="100" text-anchor="middle" fill="#7a7870" font-size="10" font-family="'IBM Plex Mono',monospace">No directed relationships yet.</text>` +
+      `<text x="135" y="118" text-anchor="middle" fill="#5a5850" font-size="9" font-family="'IBM Plex Mono',monospace">Co-occurrence is the precondition for a relationship,</text>` +
+      `<text x="135" y="130" text-anchor="middle" fill="#5a5850" font-size="9" font-family="'IBM Plex Mono',monospace">not one. Enable predicate extraction to populate this graph.</text>`;
+    return;
+  }
+  const edges=filteredEdges.map(ed=>{
     const f=GNODES.find(n=>n.id===ed.f),t=GNODES.find(n=>n.id===ed.t);if(!f||!t)return'';
     const o=opOf(ed.op);const isAct=actEnt===ed.f||actEnt===ed.t;
     return `<line x1="${f.x}" y1="${f.y}" x2="${t.x}" y2="${t.y}" stroke="${o.col}" stroke-width="${isAct?1.5:.7}" stroke-opacity="${isAct?.7:.22}" stroke-dasharray="${ed.dash||'none'}"/>`;
