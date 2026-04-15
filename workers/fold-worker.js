@@ -79,16 +79,32 @@ function fold(entry, record = true) {
 function foldINS(entry) {
   if (entry.target !== 'entity-registry') return;
   const a = entry.anchor;
+  const sig_count = entry.provenance?.sig_count || 1;
   if (!M.entities.has(a)) {
     M.entities.set(a, {
       anchor: a,
       ops: ['INS'],
-      sig_count: entry.provenance?.sig_count || 1,
+      sig_count,
       ts_ins: entry.ts,
       docs: new Set([entry.provenance?.doc_anchor]),
+      // ── Integral state ───────────────────────────────────────
+      // I_e(p) at document position p — accumulated, decayed evidence.
+      integral_value: Math.max(1, sig_count),
+      // Per-grain integral snapshots (clause, sentence, paragraph, doc).
+      grain_values: [1, 1, 1, 1].map(() => Math.max(1, sig_count)),
+      // Running mean/variance of sig-event "strength" — coherence signal.
+      // Low variance = tight integral; a jump raises bifurcation warning.
+      coh_mean: 1,
+      coh_m2: 0,                // Welford's running M2
+      coh_n: sig_count,
+      coherence_score: 1.0,     // 1 / (1 + var)
+      last_mention_position: entry.ts,
+      ins_coherence: 1.0,       // diagnostic: coherence at instantiation
     });
   } else {
-    M.entities.get(a).docs.add(entry.provenance?.doc_anchor);
+    const ent = M.entities.get(a);
+    ent.docs.add(entry.provenance?.doc_anchor);
+    ent.last_mention_position = entry.ts;
   }
   pushToQueues(a, entry.ts);
 }
@@ -169,6 +185,61 @@ function foldREC(entry) {
 function foldSIG(entry) {
   if (entry.operand?.detector === 'PRONOUN') {
     self.postMessage({ op: 'pronoun_pending', entry });
+    return;
+  }
+  // NP / ACCUMULATION SIG events are differential elements dI for a candidate
+  // entity. Route them to an instantiated entity if one exists at the same
+  // canonical anchor; otherwise accumulate into a pre-INS candidate so we can
+  // distinguish "unknown" (evidence but no INS) from "never-set" in NUL.
+  const det = entry.operand?.detector;
+  if (det !== 'NP' && det !== 'ACCUMULATION') return;
+  const target = entry.target && entry.target.startsWith('@')
+    ? entry.target
+    : (entry.operand?.normalized ? anchorLocal('np:' + entry.operand.normalized) : null);
+  if (!target) return;
+
+  const strength = Math.max(0.1, entry.provenance?.confidence || 0.5);
+  const ent = M.entities.get(target);
+  if (ent) {
+    // Fold: I_e += σ, update per-grain integral, update coherence variance.
+    ent.integral_value = (ent.integral_value || 0) + strength;
+    if (ent.grain_values) {
+      for (let g = 0; g < ent.grain_values.length; g++) {
+        ent.grain_values[g] += strength;
+      }
+    }
+    // Welford online variance of sig strengths.
+    ent.coh_n = (ent.coh_n || 0) + 1;
+    const delta = strength - (ent.coh_mean || 0);
+    ent.coh_mean = (ent.coh_mean || 0) + delta / ent.coh_n;
+    ent.coh_m2 = (ent.coh_m2 || 0) + delta * (strength - ent.coh_mean);
+    const variance = ent.coh_n > 1 ? ent.coh_m2 / (ent.coh_n - 1) : 0;
+    const prev = ent.coherence_score ?? 1.0;
+    ent.coherence_score = 1 / (1 + variance);
+    ent.last_mention_position = entry.ts;
+    // Bifurcation warning: sharp coherence drop on a hub-like entity.
+    if (prev - ent.coherence_score > 0.25 && ent.sig_count > 3) {
+      ent.bifurcation_flag = true;
+      self.postMessage({
+        op: 'bifurcation_warning',
+        anchor: target,
+        prev_coherence: prev,
+        coherence: ent.coherence_score,
+      });
+    }
+  } else {
+    // Pre-INS candidate integral — tracked so the "unknown" NUL state
+    // (evidence exists but no threshold crossing) is distinguishable from
+    // "never-set" (no evidence at all) and "cleared" (post-INS decay).
+    if (!M.candidates) M.candidates = new Map();
+    const c = M.candidates.get(target) || {
+      anchor: target, integral_value: 0, sig_count: 0,
+      first_seen: entry.ts, normalized: entry.operand?.normalized,
+    };
+    c.integral_value += strength;
+    c.sig_count += 1;
+    c.last_seen = entry.ts;
+    M.candidates.set(target, c);
   }
 }
 
@@ -237,52 +308,92 @@ function pushToQueues(anchorId, position) {
 }
 
 function decayAtBoundary(grainLevel) {
+  // Decay grain-queue weights.
   for (let g = 0; g <= grainLevel; g++) {
     grainQueues[g] = grainQueues[g]
       .map(e => ({ ...e, weight: e.weight * DECAY[g] }))
       .filter(e => e.weight > 0.02);
   }
+  // Decay per-entity grain integrals up to and including this grain.
+  // Paragraph SEG → higher λ_e; document SEG → near-zero except prominent.
+  for (const ent of M.entities.values()) {
+    if (!ent.grain_values) continue;
+    for (let g = 0; g <= grainLevel; g++) {
+      ent.grain_values[g] *= DECAY[g];
+    }
+    // Top-level integral tracks the coarsest active grain.
+    ent.integral_value = ent.grain_values[grainLevel];
+    // Mark cleared if we've decayed below working-set after INS.
+    if (ent.integral_value < 0.05 && ent.ops?.includes('INS')) {
+      ent.cleared = true;
+    }
+  }
+  // Decay pre-INS candidates too — evidence that never crossed threshold
+  // fades and eventually drops out of the working set.
+  if (M.candidates) {
+    for (const [k, c] of M.candidates) {
+      c.integral_value *= DECAY[grainLevel];
+      if (c.integral_value < 0.05) M.candidates.delete(k);
+    }
+  }
 }
 
 function resolveCoref(payload) {
   const { gram_features } = payload || {};
+  // Walk grains from narrowest to widest. At each grain, score candidates by
+  // score = I_e,g(p) × compat(grammar) — the integral-times-compatibility
+  // rule. Take the argmax whose score clears a working-set threshold.
+  const WORKING_SET = 0.15;
   for (let g = GRAIN.CLAUSE; g <= GRAIN.DOCUMENT; g++) {
     const queue = grainQueues[g];
     if (!queue.length) continue;
-    const compatible = queue.filter(e => {
+    const scored = [];
+    for (const e of queue) {
       const ent = M.entities.get(e.anchor);
-      if (!ent) return false;
-      if (gram_features?.number === 'plural' && ent.number === 'singular') return false;
-      if (gram_features?.number === 'singular' && ent.number === 'plural') return false;
-      return true;
-    });
-    if (!compatible.length) continue;
-    const sorted = compatible.slice().sort((a,b) => b.weight - a.weight);
-    const top = sorted[0];
-    const second = sorted[1];
-    const gap = second ? top.weight - second.weight : top.weight;
-    const confidence = Math.min(0.95, gap * 2);
+      if (!ent) continue;
+      if (gram_features?.number === 'plural' && ent.number === 'singular') continue;
+      if (gram_features?.number === 'singular' && ent.number === 'plural') continue;
+      const compat = 1.0; // no mention embedding available at this boundary
+      const integ = (ent.grain_values?.[g] ?? ent.integral_value ?? e.weight);
+      const score = integ * compat * e.weight;
+      if (score < WORKING_SET) continue;
+      scored.push({ anchor: e.anchor, score, integ, weight: e.weight });
+    }
+    if (!scored.length) continue;
+    scored.sort((a,b) => b.score - a.score);
+    const top = scored[0];
+    const second = scored[1];
+    const gap = second ? (top.score - second.score) / Math.max(top.score, 1e-6) : 1;
+    const confidence = Math.min(0.95, gap);
     return {
       resolved: true,
       anchor: top.anchor,
       grain: g,
       confidence,
       gap,
-      alternatives: sorted.slice(1, 4).map(e => ({ anchor: e.anchor, weight: e.weight })),
+      integral: top.integ,
+      alternatives: scored.slice(1, 4),
       nul_state: null,
     };
   }
 
-  const everExisted = [...M.entities.values()].some(e => {
-    if (gram_features?.number === 'plural' && e.number === 'singular') return false;
-    return true;
-  });
+  // No resolution. Distinguish the three NUL states the spec requires:
+  //  · never_set — no SIG and no INS ever observed for any candidate
+  //  · unknown   — SIG evidence accumulated but never crossed INS threshold
+  //  · cleared   — at least one entity had INS then decayed out of working set
+  const anyCleared = [...M.entities.values()].some(e => e.cleared);
+  const anyCandidate = M.candidates && M.candidates.size > 0;
+  const anyEntity = M.entities.size > 0;
+  let nul_state = 'never_set';
+  if (anyCleared) nul_state = 'cleared';
+  else if (anyCandidate) nul_state = 'unknown';
+  else if (anyEntity) nul_state = 'cleared';
   return {
     resolved: false,
     anchor: null,
     grain: null,
     confidence: 0,
-    nul_state: everExisted ? 'cleared' : 'unknown',
+    nul_state,
   };
 }
 
@@ -479,6 +590,26 @@ self.onmessage = async (e) => {
         edges: Object.fromEntries(M.conEdges),
         displayNames: Object.fromEntries(M.displayNames),
       }});
+    } else if (op === 'get_integral_state') {
+      const out = {};
+      for (const [k, v] of M.entities) {
+        out[k] = {
+          integral_value: v.integral_value,
+          grain_values: v.grain_values,
+          coherence_score: v.coherence_score,
+          bifurcation_flag: !!v.bifurcation_flag,
+          cleared: !!v.cleared,
+          ins_coherence: v.ins_coherence,
+          last_mention_position: v.last_mention_position,
+        };
+      }
+      const candidates = M.candidates
+        ? Object.fromEntries([...M.candidates.entries()].map(([k,c]) => [k, {
+            integral_value: c.integral_value, sig_count: c.sig_count,
+            normalized: c.normalized,
+          }]))
+        : {};
+      self.postMessage({ id, result: { entities: out, candidates } });
     } else if (op === 'resolve_coreference') {
       self.postMessage({ id, result: resolveCoref(payload) });
     } else if (op === 'flush') {
