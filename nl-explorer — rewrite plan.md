@@ -1,439 +1,687 @@
-# nl-explorer — helix enforcement via wave fold dynamics
-# Complete specification. Sits underneath the existing rewrite plan.
-# Layer 1 filters ship as-is; this plan makes them unnecessary.
+# nl-explorer — propositional reading spec
+# Sits alongside wave-fold-architecture.md and integral-coref-spec.md.
+# Those specs establish entity-level integral dynamics and coreference.
+# This spec extends the architecture to propositions as first-class objects.
 
 ---
 
-## The core problem
+## Thesis
 
-The Layer 1 quality filters (`isDisplayableEntity`, `hasPredicate`, EVA
-notice strip) are a rendering-time workaround for a pipeline that runs
-stages in sequence but not in dependency. Operator stages should be true
-dependencies on the helix:
+The current system builds an entity catalog with proximity edges. That
+is not reading. A document builds a propositional network — a structured
+argument where each sentence contributes to, tests, extends, or
+restructures what came before. The fundamental unit of tracking is wrong.
+It is tracking entities when it should be tracking propositions.
 
-- **NUL → SIG → INS** — nothing becomes an entity until signal
-  accumulates through the integral.
-- **INS → SEG → CON** — CON edges cannot exist between non-instantiated
-  anchors; co-occurrence is SIG evidence until both endpoints are INS'd.
-- **CON → SYN → DEF** — DEF frames crystallize from accumulated CON
-  neighborhood via coherence variance, not from a one-shot snapshot.
-- **DEF → EVA → REC** — EVA must test a clause against the DEF frames
-  of its entities, not classify raw clauses in isolation.
+**Entity-only architecture failure modes (confirmed on OstromPolyGov):**
 
-Today the main thread runs every stage against raw text.
-`stageINS_threshold` fires INS on frequency count, bypassing the fold
-worker's integral. `stageCON_cooccurrence` emits edges between NP
-candidates whether or not they ever get INS'd. `stageFrameDEF` hashes a
-neighborhood snapshot at call time. `stageEmbeddingClassify` runs EVA with
-no DEF context. The fold worker already implements the helix-correct
-primitives — integral crossing → INS, `pendingCons` deferral,
-`drainPendingCons`, coherence variance — but it observes the log after
-ingest completes, so its INS events arrive too late to gate anything.
+- "NDP transferred funds to NDMC PSO LLC without competitive bidding"
+  produces a co-occurrence edge plus a heuristic verb. The manner
+  modifier `without competitive bidding` is either lost or treated as
+  a separate NUL event. But the absence is constitutive of the
+  proposition — an unbidded transfer is a different claim than a
+  transfer.
 
-Enforcing dependency makes the quality filters unnecessary: entities that
-never cross θ_INS never appear. Structure becomes inevitable given enough
-evidence, instead of emergent-by-accident and filtered at the rail.
+- "Ostrom demonstrated that CPRs can be self-governed" produces three
+  entity integrals and a co-occurrence cluster. The outer proposition's
+  evidential stance (demonstrated vs. suggested vs. assumed) is not
+  captured. The inner proposition has no standing of its own — it
+  cannot be contested, extended, or cleared independently.
+
+- "Carefully designed experimental studies... enabled us to test... to
+  find that isolated, anonymous individuals overharvest from CPRs"
+  produces: experimental studies co-occurred with individuals co-occurred
+  with CPRs. The conditional structure (IF isolated AND anonymous THEN
+  overharvest), the evidence quality claim (carefully designed), and the
+  research operation (testing combinations) are all lost.
+
+- 1,955-edge relationship graph is a hairball. Every sentence produces
+  edges between every entity pair in it. Edges are all the same type.
+  None carries propositional structure.
+
+The fix is not better verb extraction or a larger vocabulary. The fix is
+making propositions first-class anchors with their own integrals, their
+own INS threshold crossings, and their own DEF frames.
 
 ---
 
-## The wave fold
+## Part 1 — The anchor namespace
 
-The wave fold is a continuous process. The integral I_e(p) at position p
-in the document is the accumulated salience of entity e up to that point,
-with decay:
+### Current state
+
+All anchors are entity anchors: `@e:<hash>`. They are created when an
+NP candidate's integral crosses θ_INS.
+
+### Required extension
+
+Two anchor types:
+
+**Entity anchors** `@e:<hash>` — unchanged. Things the document treats
+as stable individuated referents.
+
+**Proposition anchors** `@p:<hash>` — claims the document makes. A
+proposition is a predicate-argument structure:
+
+```
+Proposition {
+  subject:    @e or @p          // agent or subject-entity
+  predicate:  @ps:<slot-hash>   // predicate-slot anchor (see §3)
+  object:     @e or @p or value // patient, recipient, or typed value
+  modifiers:  Modifier[]        // manner, purpose, negation, temporal
+  evidential: @p or null        // outer proposition whose object this is
+  polarity:   ASSERTED | NEGATED | PRESUPPOSED
+  stance:     Resolution face cell (see §2)
+}
+
+Modifier {
+  type:     'manner' | 'purpose' | 'temporal' | 'condition' | 'negation'
+  content:  string or @e
+  polarity: POSITIVE | NEGATED
+}
+```
+
+**Predicate-slot anchors** `@ps:<hash>` — the relational slot between a
+subject-type and an object-type. Hash is derived from the pair
+(subject_entity_anchor, object_entity_anchor). Multiple propositions
+accumulate into the same slot; the slot develops its own DEF frame.
+
+### Proposition INS
+
+Propositions cross their own INS threshold via the same integral
+mechanism as entities, but matching is structural, not surface.
+
+"NDP transferred funds to NDMC PSO LLC" and "NDMC PSO LLC received the
+allocation from the Partnership" accumulate to the same proposition
+integral because the predicate-argument structure matches
+(agent=@e:NDP, slot=@ps:NDP→NDMC, recipient=@e:NDMC) despite the
+different surface form, voice, and predicate token.
+
+Surface matching is shallow (tokenization + normalization). Structural
+matching is what drives integral accumulation toward threshold. The
+proposition-level integral is:
+
+```
+dI_p/dp = σ_p(p) - λ_p(p) · I_p(p)
+```
+
+where σ_p is the structural match signal (see §4) and λ_p applies
+the same SEG boundary decay as entity integrals. Proposition INS fires
+when I_p crosses θ_INS — the claim is now stable, established across
+multiple pieces of evidence.
+
+---
+
+## Part 2 — The Resolution face as the CON gate
+
+### Current state
+
+`stageCON_cooccurrence` emits one event type for every entity pair
+co-occurring in a sentence. All edges are the same type. 7,638 edges on
+the Ostrom paper, 6,962 with `verb: null`.
+
+### The Resolution face CON family
+
+CON is not one operator. It is a six-member family indexed by Resolution
+face cell (Mode × Object):
+
+| CON type | Resolution cell | Dependencies | Fold effect |
+|---|---|---|---|
+| **Binding** | Relating × Entity | both endpoints INS'd | new typed edge; predicate slot accumulates |
+| **Tracing** | Relating × Pattern | ≥2 supporting Binding pairs | SYN node update; not entity graph |
+| **Tending** | Relating × Background | prior matching CON exists | refreshes existing edge's λ; no new log entry |
+| **Clearing** | Differentiating × Background | prior proposition to negate | negation edge; marks prior superseded |
+| **Dissecting** | Differentiating × Entity | both endpoints INS'd; prior conflation | distinction edge; coherence-variance event |
+| **Unraveling** | Differentiating × Pattern | prior SYN node to weaken | SYN coherence drop |
+
+**Only Binding creates new entity-graph edges.** All other types
+operate on existing structure. The hairball cannot form because the
+architecture has five reasons to not create an edge and one reason to
+create one.
+
+### Falsifiable prediction
+
+If you classify every currently-CON-emitting clause's Resolution stance
+on the Ostrom corpus, Binding clauses will be 10–20% of the total and
+will carry essentially all the propositionally meaningful relational
+structure. The remaining 80–90% are suppressible. This prediction is
+testable before committing to the rebuild.
+
+### Well-formedness constraints per CON type
+
+Each type has its own dependency constraint. Violations are not bugs to
+silently fix — they are the most interesting entries in the corpus:
+
+- **Tending without a prior matching CON**: maintenance of a
+  non-existent relationship. Same shape as EVA-without-DEF at the
+  entity level. Signals that the document is invoking a relationship
+  the reader is expected to supply from background knowledge.
+
+- **Clearing without a prior proposition**: demolishing a frame that
+  was never built in this corpus. Signals presupposition not established
+  by these documents — the document is clearing something it assumed
+  the reader already holds.
+
+- **Tracing without supporting Binding pairs**: asserting a pattern
+  with no individual instantiations in evidence. Falsifiability gap.
+
+These DAG violations should emit to the log as a new operation type or
+as EVA entries with `result: presupposition_gap`.
+
+### Binding CON: full predicate-argument structure
+
+A Binding CON entry carries the full proposition:
+
+```javascript
+{
+  op: 'CON',
+  con_type: 'binding',
+  anchor: '@p:<hash>',
+  target: '@e:<subject>',      // subject entity
+  operand: {
+    predicate_slot: '@ps:<hash>',
+    object_anchor: '@e:<object>',
+    predicate_token: 'transferred',
+    predicate_class: null,      // filled by DEF crystallization (§3)
+    object_value: 'funds',
+    modifiers: [
+      { type: 'negation', content: 'competitive bidding', polarity: 'NEGATED' }
+    ],
+    evidential: null,           // outer proposition if this is embedded
+    polarity: 'ASSERTED',
+    stance: 'Binding',
+    site: 'Existence/Entity',
+    act: 'Relating/Structure',
+  },
+  provenance: {
+    source: 'mechanical:binding_con',
+    span_start: ...,
+    span_end: ...,
+    confidence: ...,
+  }
+}
+```
+
+The negated modifier `without competitive bidding` lives inside the
+proposition, not as a sibling NUL entry. The NUL entry is a projection:
+
+```javascript
+{
+  op: 'NUL',
+  absence_type: 'constitutive_modifier',
+  proposition_anchor: '@p:<hash>',
+  modifier_type: 'negation',
+  content: 'competitive bidding',
+  note: 'Derived from proposition modifier, not keyword match'
+}
+```
+
+The proposition is the primary unit. NUL is a derived view on one of
+its modifier slots, available for cross-document absence aggregation.
+
+---
+
+## Part 3 — Predicate vocabulary as per-slot DEF crystallization
+
+### The mechanism
+
+Predicate classes are not a fixed enum. They emerge from per-slot
+integral accumulation:
+
+1. The first Binding CON between a subject and object pair creates a
+   predicate-slot anchor `@ps:<hash>`.
+
+2. Each subsequent Binding event into this slot contributes its
+   predicate verb's embedding to the slot's running centroid.
+
+3. When the variance of the slot's predicate embeddings drops below
+   θ_DEF (the same coherence-variance threshold used for entity DEF
+   crystallization), DEF fires on the slot.
+
+4. The slot DEF names the predicate class using the medoid verb of the
+   embedding cluster.
+
+5. The proposition INS fires at the same moment — the claim is now
+   stable, typed, and named.
+
+### Properties
+
+- "transferred," "paid," "remitted," "allocated" → cluster into
+  `financial-transfer` for the NDP→NDMC slot.
+
+- "demonstrated," "showed," "established," "found" → cluster into
+  `evidential-demonstration` for the Ostrom→CPR-can-self-govern slot.
+
+- Same mechanism as entity DEF crystallization. No new implementation
+  needed — new target.
+
+- Bifurcation: if the slot's predicate embeddings keep diverging
+  (variance stays high), two different relational types are being
+  conflated under the same agent/recipient pair. This is REC pressure
+  at the relational level — the same pressure that triggers entity
+  bifurcation, but applied to a relationship.
+
+### Per-document, per-corpus vocabulary
+
+The predicate lexicon is genuinely local. The financial-transfer cluster
+on NDP→NDMC may differ from the financial-transfer cluster on
+Municipality→Vendor in a different document. No shared taxonomy is
+imposed. Different relational slots between the same kinds of entities
+crystallize different predicate classes depending on how this specific
+document uses language.
+
+---
+
+## Part 4 — Proposition structural matching
+
+### Problem
+
+Proposition INS requires that structurally equivalent propositions
+accumulate to the same integral even when surface form differs.
+
+"NDP transferred funds" and "the Partnership remitted the allocation"
+need to match if they are the same propositional claim.
+
+### Matching strategy
+
+Three-tier match, cheapest first:
+
+**Tier 1: Slot match** — does this clause's subject and object resolve
+to the same entity anchors as a prior Binding CON? If yes, accumulate
+to that proposition's integral at full weight.
+
+**Tier 2: Predicate-class match** — does this clause's predicate verb
+embed near the slot's existing predicate centroid (once it has one)?
+If yes, accumulate at 0.8 weight. If no, create a bifurcation pressure
+event.
+
+**Tier 3: Structural-paraphrase match** — does the clause's full
+embedding sit near an existing proposition anchor's structural
+embedding? This is the LLM hook (H1) — invoked only when Tier 1 and
+Tier 2 are inconclusive. Output: `same_proposition: bool`.
+
+### The embedded proposition problem
+
+"Ostrom demonstrated that CPRs can be self-governed" has two
+propositions:
+
+```
+P1: Ostrom → demonstrated → [P2]
+P2: CPRs → can-self-govern → (no specific object)
+```
+
+P2 is the object of P1. P2 has its own anchor, its own integral, its
+own DEF frame. P1 is an evidential wrapper that sets P2's epistemic
+standing from "hypothesis" to "finding."
+
+When P2's integral crosses INS independently (from other Binding CONs
+that make the same claim), P2 is established regardless of P1. When P1
+accumulates (from other documents that also say Ostrom demonstrated
+this), P1 is established as a stable evidential relationship.
+
+The evidential modifier on P2 is:
+
+```javascript
+{
+  type: 'evidential',
+  source_proposition: '@p:P1',
+  agent: '@e:Ostrom',
+  predicate_class: 'evidential-demonstration',
+  elevates_standing_to: 'finding'
+}
+```
+
+The system tracks who demonstrated what, with what predicate. Not just
+that two entities co-occurred near "demonstrated."
+
+---
+
+## Part 5 — The integral equation for propositions
+
+### Entity integral (existing)
 
 ```
 dI_e/dp = σ_e(p) - λ_e(p) · I_e(p)
 ```
 
-Signal arrives when e is mentioned — σ_e(p) spikes, weighted by
-structural position. Subject position contributes most. Argument position
-contributes moderately. Citation position contributes weakly — the
-document is not foregrounding the cited string as a stable referent.
-Between mentions, the integral decays at rate λ_e, modulated by the grain
-boundary just crossed:
+where σ_e is Site-face-weighted signal (Entity site > Background site >
+Pattern site — see wave-fold-architecture.md §Resolution face) and λ_e
+is SEG-boundary-modulated decay.
 
-| Boundary | Decay multiplier |
-|---|---|
-| Clause | × 1.0 (minimal) |
-| Sentence | × 0.85 |
-| Paragraph | × 0.5 |
-| Section | × 0.2 |
+### Resolution-face modulation on σ (entity level, extended)
 
-INS fires at the first crossing of θ_INS — not when count ≥ 3, but when
-the integral crosses threshold, which requires sustained coherent signal
-across structurally foregrounded positions, not just frequency.
+From the wave-fold spec, but now integrated with proposition awareness:
 
-**The fold operation** fires at pronouns and anaphoric references. The
-accumulated integral at position p is the wave shape. When a pronoun
-arrives, fold that shape back onto itself to find the peak — the most
-salient compatible anchor in the working set. Confidence is the gap
-between the top candidate and the second, normalized. The pronoun resolves
-to the peak. Continuous accumulated state collapses to a discrete
-reference assignment. That's the fold.
+| Resolution stance | σ modifier | λ modifier | target |
+|---|---|---|---|
+| Making / Composing | × 1.8 | × 1.0 | entity integral |
+| Binding / Tracing | × 1.0 | × 1.0 | entity integral + slot |
+| Tending | × 0.0 | × (1 - τ) | λ decay suppression only |
+| Clearing / Dissecting | × -0.6 | × 1.0 | see §2 decrement targets |
+| Cultivating | × 0.3 | × 1.0 | unknown-NUL precursor slot |
 
-**Why this produces inevitability.** "Policy Analysis Indiana University
-Bloomington" appears three times, all in citation position. Weak signal,
-far apart, integral never crosses θ_INS. Never instantiated — not because
-a filter rejected it, but because the document never treated it as a
-stable referent. "Common-pool resources" appears in subject position,
-gets abbreviated to "CPRs", gets pronominalized. Integral rises steeply,
-crosses threshold early, stays high. `isDisplayableEntity` approximates
-this distinction with token-count heuristics. The integral computes it
-formally, without domain knowledge, on any document in any genre.
+**Tending modifies λ, not σ.** This is the critical distinction.
+Repeated Tending events cannot push an integral past θ_INS. Ten
+"as we have seen..." references to an entity keep it warm without
+building it up. Repeated small σ spikes from weak-but-positive signals
+do accumulate. These are different behaviors and must be separate in
+the equation.
 
----
+### Proposition integral
 
-## Three NUL states from integral history
-
-The three absence states — never-set, unknown, cleared — are formally
-derivable from the integral trajectory at any position in the document.
-No keyword detection required.
-
-**Never-set:** no SIG events have ever fired for this schema slot. The
-integral has no history at all.
-
-**Unknown:** SIG events have fired and the integral has accumulated, but
-it has never crossed θ_INS. The document has noticed this thing but hasn't
-committed to it as a stable referent. Signal exists, just not enough to
-instantiate.
-
-**Cleared:** the integral crossed θ_INS (INS fired), but subsequent decay
-without reinforcing signal has dropped it below a floor threshold. The
-entity was established and has since receded. The document foregrounded it
-and then moved on.
-
-When a schema slot exists — something the document implies should be
-filled, like an authorization, a disclosed amount, a named party — and the
-integral for that slot is in unknown or cleared state, that's a structural
-absence finding. The current NUL stage has 8 entries, all `explicit_claim`
-keyword matches. The integral produces structural absences automatically.
-"The authorization record's integral is in unknown state — the slot was
-established but no entry ever crossed threshold" is a methodologically
-grounded claim, not a pattern match.
-
----
-
-## Coherence variance as the DEF crystallization signal
-
-The fold worker already implements coherence variance. It's the right
-signal for when DEF should crystallize — not "the neighborhood is stable"
-(vague) but "the variance of the integral values across the neighbor set
-has dropped below θ_DEF."
-
-When an entity first gets INS'd, its neighbors are noisy — everything that
-co-occurred in the early evidence. As more evidence accumulates, the
-integral values for genuine structural neighbors stay high while incidental
-co-occurrences decay. The variance of the neighbor integrals compresses.
-When it drops below θ_DEF, the neighborhood has crystallized. DEF fires
-then — not at call time, not on a snapshot.
-
-This makes DEF timing document-relative. An entity that gets instantiated
-early but whose neighborhood keeps shifting (like a highly connected hub)
-takes longer to crystallize a DEF frame than an entity that gets
-instantiated once and keeps appearing in the same structural context. The
-threshold is the same for both; the dynamics produce different timings
-from the document's own evidence.
-
----
-
-## The document builds its own predicate vocabulary
-
-The predicate vocabulary for CON — the verbs that characterize
-relationships — should emerge from the document itself, not from a fixed
-enum. The wave fold enables this.
-
-When two INS'd entities keep co-occurring with the same verb between them,
-that verb's integral accumulates. When the verb integral crosses threshold,
-the predicate is established as part of the relationship's DEF frame. The
-predicate lexicon is emergent from the document's own usage. "Transferred"
-appears eight times between NDP and NDMC PSO LLC, always in the same
-structural position, with high integral accumulation. It becomes the named
-predicate for that relationship. A verb that appears once between two
-entities and then doesn't recur decays without becoming a predicate.
-
-`stageCON_cooccurrence` doesn't need an external predicate list. It needs
-to track verb co-occurrence integrals alongside entity integrals. The H1
-LLM hook for predicate extraction becomes a fallback for cases where the
-integral hasn't accumulated enough to establish a predicate from the
-document's own evidence — not the primary mechanism.
-
-The relationship's DEF frame then includes the established predicates with
-their integral values: "X and Y are connected via [verb1] (integral: 3.2)
-and [verb2] (integral: 1.8), across [n] co-occurrences." This is richer
-than a structural hash, grounded in the document's own language.
-
----
-
-## Convergence as the coreference criterion
-
-Within-document pronoun resolution folds to the peak of the current
-integral. Cross-document coreference requires a stronger criterion: two
-entity anchors co-refer if and only if their integral trajectories
-converge as evidence accumulates.
-
-If "NDP" and "Nashville Downtown Partnership" are the same entity, their
-integral trajectories across documents should converge. The same evidence
-that makes one salient makes the other salient. Their neighborhood
-compositions become increasingly similar. Their DEF frames are tested by
-the same EVA evidence. Convergence is the criterion.
-
-If they're distinct, their trajectories diverge or remain parallel
-regardless of how much evidence accumulates. The static structural
-similarity measure — Jaccard on neighbor sets, trigram similarity,
-temporal pattern matching — is a snapshot approximation of this dynamic
-criterion. It's a useful early signal, but the convergence criterion is
-what makes a merge decision grounded rather than heuristic.
-
-Practically: track the rolling similarity of integral trajectories across
-documents. When trajectory similarity exceeds a threshold and is stable
-(its derivative approaches zero), merge the anchors. When trajectory
-similarity is below threshold or diverging despite accumulated evidence,
-they're distinct. The merge confidence score is the integral of the
-convergence signal, not a one-time Jaccard computation.
-
----
-
-## EVA calibration via integral bootstrapping
-
-The 92% flat EVA profiles are a diagnostic signal about the relationship
-between the document's domain and the centroid set — not just a display
-problem.
-
-When flat rate exceeds 60% in the first 100 clauses, use the three-
-question responses from those clauses to bootstrap document-specific
-pseudo-centroids. Cluster the clause embeddings by their three-question
-cell assignments. Derive centroids from the clusters. These pseudo-
-centroids are valid only for this document, but they're derived from the
-document's own structure rather than from an external corpus that may not
-match this domain.
-
-This is the wave fold at the meta-level: the document's own evidence
-accumulates into a classification instrument. After bootstrapping,
-subsequent EVA classification uses the document-specific centroids.
-The flat rate drops because the measurement instrument has been calibrated
-to this domain. The calibration DEF entry (`classifier_mode:
-flat_profile_detected`) triggers this process, not just a notice strip.
-
----
-
-## The integral as audit trail
-
-The Given-Log records what was observed, not what happened. The integral
-makes this epistemically precise. At any position p, I_e(p) represents
-the accumulated evidence that entity e is a stable referent, weighted by
-recency and coherence. Not "entity e exists" — that's a claim about the
-world. But "the document has been treating e as a stable referent up to
-position p with integral value I_e(p)" — that's a claim about the text,
-which is directly observable and auditable.
-
-The audit trail report is derivable from integral trajectories over the
-log. "We know the authorization record is absent because: the
-authorization slot exists (its integral crossed θ_INS from the regulatory
-schema), the authorization record entity's integral in the document corpus
-is in unknown state (never crossed threshold despite the slot being
-established), and this absence was detected at document position X with
-integral value Y." That's methodologically grounded absence, not keyword
-matching.
-
----
-
-## What the current pipeline is doing instead
-
-The fold worker keeps counts and structural relationships. It doesn't
-maintain running integral values. It doesn't decay anything between
-mentions. It doesn't have grain-boundary events that modulate the decay
-rate. This is accumulation, not integration.
-
-`stageINS_threshold`: histogram. `findVerbBetween`: heuristic substring
-search. Pronoun CON entries: `confidence: 0`, `subject_text: "?"`. EVA:
-labeling clauses against global centroids with no DEF context. NUL: 8
-keyword matches. DEF frame values: unreadable anchor hashes.
-
-The fold worker already has the correct machinery — integral crossing,
-pendingCons deferral, coherence variance. The problem is it observes the
-log after ingest, so nothing gates on its output.
-
----
-
-## The three changes
-
-### Change 1 — Remove `stageINS_threshold`; fold worker owns INS
-
-**Delete:**
-- `stageINS_threshold` at index.html:3062–3126
-- Call site at index.html:3941
-- Visibility count block at index.html:3942–3945
-
-Stream new log entries to the fold worker as they are pushed during
-ingest, not after. After each `stageSIG_*` call (lines 3924–3926),
-iterate entries since a high-water mark and `await appendToLog(entry)`
-for each. No change to `OperatorLog`.
-
-Add a crystallization barrier between SIG and CON in `ingest()`:
-
-```javascript
-await workerRequest(workerBridge.foldWorker, 'flush', {});
-const entityAnchors = await workerRequest(
-  workerBridge.foldWorker, 'get_entity_anchors', { doc_anchor: da }
-);
+```
+dI_p/dp = σ_p(p) · match_weight(p) - λ_p(p) · I_p(p)
 ```
 
-The returned map has the same `{ normalized: anchor }` shape downstream
-stages expect, but sourced exclusively from integral crossings in
-`foldSIG` (fold-worker.js:398–421).
+where:
 
-**Fold worker additions:**
-- `get_entity_anchors` handler: return `M.entities` filtered by
-  `doc_anchor`, with `normalized` field stored at INS time in `foldINS`
-  (lines 131–155).
-- Extend main-thread `fold_event` handler (index.html:4730): INS/DEF
-  events emitted by the worker must also push into the live log object —
-  downstream stages iterate `log.entries()` and must see them.
-- Reconcile `COREF_CONFIG.ins_threshold` (currently 4.0 at
-  fold-worker.js:27) with the old count floor of 3 before deletion. Tune
-  via telemetry; expose via `COREF_CONFIG_UPDATE`.
+- `σ_p(p)` is the clause's Binding signal strength (Site × Act face
+  product, see §2)
+- `match_weight` is the tier from §4 (1.0 for slot match, 0.8 for
+  predicate-class match, 0.5 for paraphrase match, 0.3 for structural
+  near-miss)
+- `λ_p` is the same SEG boundary decay
 
-**Integral dynamics to wire (fold-worker.js):**
-
-On each SIG event: add σ (weighted by structural position — subject × 1.0,
-argument × 0.6, citation × 0.15) to I_e.
-
-On each SEG event: apply decay multiplier to all live integrals per the
-boundary table above. Entities with I_e below floor threshold move to
-background state — still in M, not in the active working set.
-
-On INS crossing: fire INS entry, store `normalized` field, add to
-`get_entity_anchors` response set.
-
-**NUL state assignment (fold-worker.js):** When processing a schema slot
-that hasn't been filled, assign NUL state from integral history:
-- No SIG history for this slot → `never-set`
-- SIG history present, never crossed θ_INS → `unknown`
-- Crossed θ_INS then decayed below floor → `cleared`
-
-Emit structured NUL entries with state, integral value at detection, and
-position. The main-thread keyword-match NUL stage becomes a secondary
-signal only.
-
-### Change 2 — Gate `stageCON_cooccurrence` on INS state; verb integral tracking
-
-`stageCON_cooccurrence` (index.html:3198–3247) keeps its signature. The
-gate is implicit once `entityAnchors` is the worker-returned INS'd set.
-The union regex only matches canonicals that crossed θ_INS — no CON edge
-can be emitted between non-INS'd anchors.
-
-For co-occurrences involving pre-INS candidates: emit SIG with
-`detector: 'COOC_EVIDENCE'` that feeds the candidate's integral. Fetch
-candidate surface forms via new worker op `get_candidate_anchors`. Route
-matches to SIG instead of CON until both endpoints are INS'd.
-
-**Verb integral tracking (fold-worker.js):** Alongside entity integrals,
-maintain verb integrals per entity pair. When two INS'd entities
-co-occur with a verb V between them, increment I_{V,e1,e2}. When this
-integral crosses a predicate threshold, the verb is established as a
-named predicate for the relationship and included in the next DEF frame
-crystallization. The predicate vocabulary is discovered from the
-document's own structural patterns.
-
-The existing `pendingCons` / `drainPendingCons` machinery
-(fold-worker.js:210–230) becomes a backstop — most premature CONs are now
-prevented at emission time.
-
-**Pronoun fold (fold-worker.js):** When a pronoun SIG arrives, read the
-current working set ordered by integral value (not recency). Filter by
-grammatical compatibility. Top compatible entity by integral value is the
-resolution candidate. Confidence = normalized gap between top and second
-candidate. Return NUL state if working set is empty — assign `unknown`
-(SIG accumulated but no INS yet), `cleared` (INS'd entity decayed), or
-`never-set` (no compatible entity in any grain) accordingly.
-
-### Change 3 — DEF crystallizes via coherence variance; EVA receives DEF context and integral values
-
-**Migrate `stageFrameDEF`** (index.html:3294–3340, plus `buildFrameLabel`
-at 3278–3292 and `neighborSet` helper) into fold worker function
-`crystallizeFrames(doc_anchor)`.
-
-The crystallization trigger is coherence variance dropping below θ_DEF —
-not a call-time snapshot. `crystallizeFrames` reads `M.entities`,
-`M.conEdges`, verb integrals, and current integral values. For each
-INS'd entity whose coherence variance has crossed the threshold since the
-last crystallization, emit a DEF entry via local `fold(defEntry)`.
-
-The DEF frame includes:
-- `neighbor_set` with integral values per neighbor (not just anchors)
-- `established_predicates` from verb integrals above predicate threshold
-- `coherence_variance` at crystallization time
-- `frame_label` in readable form
-
-Replace the main-thread call at index.html:3977:
-
-```javascript
-await workerRequest(foldWorker, 'crystallize_frames', { doc_anchor: da });
-```
-
-**EVA with DEF context (index.html:3671–3741):** Before `classifyClauses`
-at line 3683:
-
-```javascript
-const frames = await workerRequest(foldWorker, 'get_all_frames', { doc_anchor: da });
-const integrals = await workerRequest(foldWorker, 'get_integrals', { doc_anchor: da });
-```
-
-For each clause, find entity anchors present in the clause text via the
-union regex. Attach `{ text, entities, frames, integrals }` to the
-classifier input.
-
-Extend `window.EOClassifier.classifyClauses` to produce a second EVA
-entry per clause with `eva_type: 'frame_test'`. For each entity in the
-clause with an established DEF frame:
-- Compare the clause embedding against the frame's neighbor-set centroid
-- Weight the comparison by the entity's current integral value (highly
-  salient entities contribute more to the EVA result)
-- Produce result in `{satisfies, extends, contracts, conflicts}`
-
-The existing 27-cell classification still runs and answers "what kind of
-transformation." The frame test answers "does this evidence reshape the
-frame." Together they produce: "this clause is a CON-type event that
-extends the frame of common-pool resources."
-
-**EVA calibration bootstrapping:** In `stageEmbeddingClassify`, after
-first 100 clause results: if flat rate > 60%, run three-question
-classification on those clauses, cluster their embeddings by cell
-assignment, derive document-specific pseudo-centroids, and use them for
-all subsequent EVA classification in this document. Log the bootstrapping
-as a DEF entry: `param: 'classifier_mode', value: 'domain_bootstrapped'`.
-The flat-rate advisory strip still appears — now it also reports the
-bootstrapping result.
-
-**Cross-document coreference via trajectory convergence (fold-worker.js):**
-When `stageSIM_candidates` runs across multiple documents, compute
-trajectory similarity as the rolling similarity of integral values over
-shared evidence positions, not a one-time Jaccard score. Two anchors are
-merge candidates when their trajectory similarity exceeds threshold AND
-is stable (derivative near zero). Two anchors are confirmed distinct when
-trajectory similarity is diverging despite accumulated evidence. Upgrade
-the existing Jaccard/trigram structural similarity to feed into the
-trajectory computation rather than replace it.
+Proposition INS fires at the same θ_INS. The proposition is established
+as stable when the accumulated structural evidence crosses threshold.
 
 ---
 
-## Synchronization protocol
+## Part 6 — DEF at the proposition level
 
-**New worker ops:**
+Entity DEF frames: what the entity is — its neighbor set in the CON
+graph, its predicate types, its structural position.
 
-| Op | Input | Output |
+Proposition DEF frames: what the claim asserts — its predicate class,
+its argument types, its modifier structure, its evidential standing,
+and the accumulated evidence that establishes it.
+
+A proposition's DEF frame crystallizes when:
+
+1. Its predicate slot has a crystallized predicate class (§3)
+2. Its argument entities both have INS'd anchors
+3. Its modifier pattern has stabilized (modifier-variance below θ_DEF)
+
+Until all three conditions hold, the proposition is in a partial-DEF
+state — the same "face committed, axis uncertain" logic as the
+cube/face decomposition for EVA entries.
+
+### Partial proposition DEF
+
+A proposition can have:
+- Agent known, predicate class crystallized, object uncertain → partial
+  DEF, unknown on Object axis
+- Agent known, object known, predicate class not yet crystallized →
+  partial DEF, unknown on predicate axis
+- Full DEF → all three slots crystallized
+
+These partial states emit to the log as DEF entries with
+`resolution: 'partial'` and `unknown_axis: 'object' | 'predicate'`.
+
+---
+
+## Part 7 — EVA at the proposition level
+
+### Current state
+
+EVA classifies clauses against 27 centroids. The outcome (satisfies /
+extends / contracts / conflicts) is derived from confidence gap and
+z-score thresholds. These are proxies for an epistemic distinction the
+Resolution face measures directly.
+
+### Proposition-level EVA
+
+EVA tests a new proposition against the established DEF frame of a
+prior proposition:
+
+| EVA outcome | Resolution stance of new clause | Effect |
 |---|---|---|
-| `get_entity_anchors` | `{ doc_anchor }` | `{ [normalized]: anchor }` |
-| `get_candidate_anchors` | `{ doc_anchor }` | `{ [normalized]: { anchor, integral, sig_count } }` |
-| `crystallize_frames` | `{ doc_anchor }` | `{ emitted: n }` |
-| `get_all_frames` | `{ doc_anchor }` | `{ [anchor]: frame }` |
-| `get_integrals` | `{ doc_anchor }` | `{ [anchor]: integral_value }` |
+| satisfies | Tending or Binding consistent with frame | Frame confidence increases |
+| extends | Tracing or Composing adding to frame | Frame grows; no conflict |
+| contracts | Clearing or Dissecting removing from frame | Frame shrinks; pressure may build |
+| conflicts | Making or Binding incompatible with frame | Conflict event; REC pressure |
 
-`flush` must guarantee all queued BroadcastChannel `new_entry` messages
-are folded before resolving — add a microtask barrier if needed.
+This is the measurement replacing the proxy. The EVA outcomes are
+Resolution face cells, not confidence thresholds.
 
-**Sequenced chain in `ingest()`:**
+### Cross-document investigative EVA
+
+Document A: "NDP transferred $4.2M to NDMC PSO LLC in FY2019."
+Document B: "NDP transferred $1.9M to NDMC PSO LLC in FY2020-2021."
+
+Both entity integrals (NDP, NDMC) are stable. The conflict is not
+visible at entity level. It is a proposition-level EVA event:
+
+- Same predicate slot: `@ps:NDP→NDMC:financial-transfer`
+- Same predicate class: crystallized from prior Binding events
+- Different numeric arguments: $4.2M vs $1.9M
+- Same temporal scope or overlapping temporal scope
+- EVA result: `conflicts` — same slot, same class, incompatible value
+
+The REC candidate is not about any entity. It is about the proposition:
+same transfer with different reported amounts? Two different transfers?
+Misreporting? Fraud? The question lives at the relational level.
+
+This is what makes the system fit for investigative reading. The entity
+graph cannot formulate this question. Proposition-level EVA can.
+
+---
+
+## Part 8 — NUL from proposition structure
+
+### Current state
+
+8 NUL entries for the Ostrom paper, all `explicit_claim` keyword
+matches. Expected ratio of structural-to-explicit: ~5:1 or higher.
+
+### Three NUL states as Resolution face derivatives
+
+**Never-set:** No Cultivating events have ever targeted this slot.
+The document has never gestured toward it.
+
+**Unknown:** Cultivating events exist for this slot without follow-up
+Making. The document is repeatedly gesturing toward something it
+never instantiates. This is different from "an NP appeared but didn't
+reach threshold" — it is the document performing a gesture as a mode.
+Cultivating-without-Making is its own epistemic state.
+
+```
+If Count(Cultivating → @slot) > 0 AND Count(Making → @slot) == 0
+  → emit NUL(unknown, slot)
+```
+
+**Cleared:** Making events exist for this slot, followed by either
+sustained absence of Tending (decay) or explicit Clearing/Dissecting.
+
+```
+If I_slot > θ_INS was true at time t
+  AND I_slot < θ_floor is true at time t'
+  → emit NUL(cleared, slot, decayed_since: t)
+```
+
+### Constitutive modifiers as NUL projections
+
+The modifier `without competitive bidding` inside a Binding CON emits
+a NUL projection:
+
+```javascript
+{
+  op: 'NUL',
+  absence_type: 'constitutive_modifier',
+  nul_state: 'asserted_absent',
+  proposition_anchor: '@p:<hash>',
+  slot: 'competitive-bidding-process',
+  note: 'Absence is constitutive of the proposition, not a separate finding'
+}
+```
+
+The NUL lives inside the proposition's modifier structure AND emits to
+the NUL index for cross-document aggregation. Both representations are
+needed. The proposition is primary; the NUL entry is a derived view.
+
+---
+
+## Part 9 — Budget gate: where to spend extraction
+
+### The extraction cost problem
+
+Proposition extraction requires predicate-argument identification with
+modifier attachment. This is expensive. The system cannot afford to
+extract from every clause.
+
+### Resolution face as budget gate
+
+The Resolution face classifies clause stance cheaply (centroid lookup).
+Extraction budget is allocated by stance:
+
+| Resolution stance | Extraction | Rationale |
+|---|---|---|
+| Binding | Full SPO + modifier extraction (LLM or parser) | Only Binding creates propositions |
+| Tracing | Extract predicate class + entity types, no individual arguments | Pattern-level, not instance-level |
+| Tending | No extraction | Just refresh existing CON integral |
+| Background clauses (any) | Weak diffuse frame update | Atmospheric; no propositions |
+| Clearing / Dissecting | Extract enough to identify what is being negated/distinguished | Connect to prior proposition |
+| Unraveling | Extract pattern features to identify which SYN node is weakening | |
+| Cultivating | Extract slot target for unknown-NUL tracking | |
+
+**~80% of clauses get cheap stance-and-integral updates. Only the
+Binding ~10-20% get expensive extraction.** The architecture is honest
+about its limits. The Resolution face tells the system where to spend
+budget before spending it.
+
+---
+
+## Part 10 — EVA multi-tier measurement
+
+From the Claude Code session's `classifyClause` extension:
+
+```javascript
+{
+  cube: { cell_id, gap, profile_27 },
+  faces: {
+    act:        { cell_id, gap, profile_9 },   // Mode × Domain
+    site:       { cell_id, gap, profile_9 },   // Domain × Object
+    resolution: { cell_id, gap, profile_9 },   // Mode × Object  ← primary EVA carrier
+  },
+  axes: {
+    mode:   { value, gap, profile_3 },
+    domain: { value, gap, profile_3 },
+    object: { value, gap, profile_3 },
+  },
+  consistency: {
+    faces_imply_cube: bool,
+    dominant_face: 'resolution' | 'act' | 'site' | null,
+    disputed_axis: 'mode' | 'domain' | 'object' | null,
+  }
+}
+```
+
+**The Resolution face is the primary EVA outcome carrier.**
+
+The cube cell becomes a derived field — present when all three faces
+co-locate to a single cube cell, marked provisional when they don't.
+
+`consistency.disputed_axis` is what H3 currently recovers by asking
+the LLM to label three letters. With face centroids, it derives from
+arithmetic on the similarity profiles. LLM escalation only when faces
+disagree with each other — far cheaper, fully auditable.
+
+### EVA boundary diagnosis (replacing the flat-profile flag)
+
+Old: `confidence_gap < 0.08` → boundary flag → 92% of clauses.
+
+New: three structurally distinct situations:
+
+1. **Cube flat, two faces decisive:** one axis is uncertain. The
+   disputed axis is identifiable. The clause can commit to a face
+   cell rather than a cube cell. This is not noise — it is a real
+   partial commitment.
+
+2. **Cube flat, Site decisive, Resolution split:** the document is
+   doing a recognizable transformation on an under-defined object.
+   Partial proposition commitment.
+
+3. **All faces flat:** genuinely off-distribution. Real REC pressure.
+   The clause hasn't earned a frame yet.
+
+### Reading-grain alignment
+
+Early in a document, integrals haven't crystallized; cube classifications
+produce flat profiles by construction. The face decomposition provides a
+graceful fallback ladder:
+
+```
+cube decisive            → commit to cube cell
+cube flat, faces decisive → commit to face cell, third axis open
+faces split              → commit to dominant face, others open
+all faces flat           → SIG only, no EVA — clause hasn't earned a frame
+```
+
+This makes EVA grain-sensitive. The integration window matches the
+entity's DEF frame maturity. Cube is sentence-grain. Face is
+paragraph-grain. Axis is section-grain.
+
+---
+
+## Part 11 — M state additions
+
+The fold worker's M state currently holds:
+
+```
+M.entities     Map<anchor, entity>
+M.defFrames    Map<anchor, frame>
+M.conEdges     Map<key, edge>
+M.evaHistory   Map<anchor, EVA_entry[]>
+M.recPending   Map<anchor, REC_candidate>
+M.pressure     Map<anchor, pressure_score>
+M.displayNames Map<anchor, string>
+```
+
+New additions:
+
+```
+M.propositions     Map<@p:hash, proposition>
+M.predicateSlots   Map<@ps:hash, slot>
+M.propIntegrals    Map<@p:hash, integral_value>
+M.slotIntegrals    Map<@ps:hash, integral_value>
+M.propDEFFrames    Map<@p:hash, prop_frame>
+M.cultivating      Map<slot, Cultivating_event[]>  // unknown-NUL precursors
+M.negated          Map<@p:hash, @p:hash>           // negation edges
+M.distinctions     Map<@e:hash, Set<@e:hash>>      // Dissecting results
+```
+
+The OPFS checkpoint schema grows to include these. The fold worker
+`get_graph` op returns nodes as `{entities, propositions}` and edges as
+`{binding, tracing, clearing, dissecting, tending_refreshed}`.
+
+---
+
+## Part 12 — Log entry additions
+
+### New `op` values
+
+None. All new log entries use existing operators with new operand
+structure:
+
+- **INS** with `target: 'proposition-registry'` and
+  `operand.anchor_type: 'proposition'`
+- **CON** with `operand.con_type: binding|tracing|tending|clearing|dissecting|unraveling`
+- **DEF** with `operand.param: 'predicate_class'` for slot DEF
+  crystallization
+- **EVA** with `operand.eva_type: 'proposition_frame_test'` for
+  proposition-level frame testing
+- **NUL** with `operand.absence_type: 'cultivating_without_making' |
+  'constitutive_modifier' | 'proposition_decayed'`
+- **REC** with `operand.trigger: 'proposition_conflict'` for
+  relational-level frame bifurcation
+
+The helix ordering is preserved. Operator semantics are unchanged.
+The new content lives in the operand structure, not in new operators.
+
+---
+
+## Part 13 — Sequence changes in `ingest()`
+
+Current sequence (from pipeline-rewrite-plan.md):
 
 ```
 SIG_NPs + pronouns + reframe
@@ -444,87 +692,99 @@ SIG_NPs + pronouns + reframe
   → stageEVA_temporal → stageNUL
 ```
 
----
+New sequence:
 
-## Critical files
+```
+SIG_NPs + pronouns + reframe
+  → flush → get_entity_anchors
 
-| File | Locations |
-|---|---|
-| `index.html` | `ingest()` at 3895; `stageINS_threshold` at 3062; `stageCON_cooccurrence` at 3198; `stageFrameDEF` at 3294; `stageEmbeddingClassify` at 3671; worker bridge at 4693–4770 |
-| `workers/fold-worker.js` | `foldSIG` integral crossing at 297–421; `foldCON` deferral at 197–230; `foldINS` at 122–175; coherence variance (existing); `onmessage` switch (add new ops); `COREF_CONFIG.ins_threshold` at 27 |
-| EO classifier | `window.EOClassifier.classifyClauses` — extend to accept `entities`, `frames`, `integrals`; emit `frame_test` EVA |
+  → stageINS_definitions
 
----
+  → stageEmbeddingClassify_stance   // classify Resolution face only,
+                                    // don't emit EVA yet — just label
+                                    // each clause with its stance
 
-## Code that becomes deletable after helix lands
+  → stageCON_typed                  // replaces stageCON_cooccurrence
+    → Binding clauses only → full SPO extraction
+    → Tracing → pattern features
+    → Tending → refresh existing
+    → Clearing/Dissecting/Unraveling → negation/distinction/weakening
+    → Cultivating → unknown-NUL precursor
 
-- `stageINS_threshold` (~65 LOC, index.html:3062–3126)
-- Main-thread `stageFrameDEF`, `buildFrameLabel`, `neighborSet` (~80 LOC,
-  index.html:3278–3340)
-- `isDisplayableEntity` and all call sites — keep as no-op shim until
-  telemetry confirms integral threshold gates at the quality boundary
-- Keyword-match NUL stage (8 entries) — replaced by structural NUL from
-  integral history
-- Post-ingest bulk drain loop (index.html:5509–5511) — replaced by
-  streaming emit
+  → stageSPO_from_binding           // SPO now derives from Binding CON,
+                                    // not separately extracted
+
+  → stageSYN                        // from Tracing CON, not Binding
+
+  → flush → crystallize_frames      // entity DEF
+          → crystallize_slots       // predicate-slot DEF
+
+  → flush → get_all_frames
+          → get_all_slots
+          → get_integrals
+          → stageEVA_proposition    // EVA against proposition frames
+          → stageEVA_temporal
+
+  → stageNUL_structural             // from Cultivating-without-Making
+                                    // and Clearing events
+  → stageNUL                        // keyword fallback (kept but demoted)
+```
+
+The key change: Resolution face classification happens first, before
+any CON emission. The stance gates what extraction work follows.
 
 ---
 
 ## Verification
 
-End-to-end on OstromPolyGov (382 bad entities, 6,962 predicate-less CONs,
-978 flat-profile EVAs, 8 keyword NULs):
+On OstromPolyGov and NDP investigation corpus:
 
-**Structural correctness:**
+**Proposition network structure:**
+1. Binding CON count is 10–20% of current total CON count. Graph is
+   legible — Binding edges with typed predicates, a few Tracing edges,
+   a few Clearing edges demolishing prior assumptions.
+2. Predicate slots crystallize with recognizable class names for the
+   dominant relational structures (financial-transfer, authorization,
+   governance-finding, evidential-demonstration).
+3. "Without competitive bidding" appears as a constitutive modifier
+   on the Binding CON proposition, not as a separate NUL keyword match.
 
-1. `M.entities.size` far smaller than 382; no citation strings, figure
-   labels, or pure stopword nouns — with `isDisplayableEntity` disabled.
+**Proposition INS quality:**
+4. "NDP transferred funds to NDMC PSO LLC" and variants accumulate to
+   the same proposition integral — verified by checking that subsequent
+   surface-varied occurrences increment the same `@p` anchor.
+5. "Ostrom demonstrated that CPRs can be self-governed" produces two
+   proposition anchors — the outer evidential and the inner claim —
+   with the inner claim independently trackable across documents.
 
-2. CON graph contains no edges where either endpoint has no entry in
-   `M.entities`.
+**EVA diagnosis:**
+6. EVA flat-profile rate drops from 92% when using Resolution face
+   as primary carrier vs. Act face centroid.
+7. Boundary cases are classified into the three diagnostic types
+   (axis-uncertain, face-split, genuinely-off-distribution) rather than
+   collapsing to a single `boundary` flag.
+8. `consistency.disputed_axis` agrees with H3 tiebreak outputs on the
+   test set — verifying that arithmetic on face profiles recovers what
+   the LLM was being asked to recover.
 
-3. Every DEF frame in `M.defFrames` emitted by the worker, not main
-   thread. Every DEF frame includes `coherence_variance` at
-   crystallization time.
+**Cross-document investigative EVA:**
+9. The $4.2M vs $1.9M figure conflict on the NDP→NDMC financial-transfer
+   slot fires a proposition-level EVA `conflicts` entry. No entity is
+   individually under pressure. The conflict is at the relational level.
+10. The audit trail for this conflict traces to the specific Binding CON
+    entries from each document with their spans and confidences.
 
-4. Toggle `isDisplayableEntity` to always-true. Entity counts unchanged.
-   The helix is doing what the filter used to do.
+**NUL coverage:**
+11. Structural NUL entries (Cultivating-without-Making, Clearing,
+    constitutive-modifier projections) outnumber keyword NUL entries by
+    at least 3:1.
+12. Three-state NUL classification (never-set / unknown / cleared) is
+    derivable from log history without keyword detection — verified by
+    disabling the keyword NUL stage and checking that the structural
+    stage recovers the same 8 original entries plus additional ones.
 
-**Integral dynamics are genuinely running:**
-
-5. `M.entities` contains running integral values per entity. Values vary:
-   high for foregrounded entities (common-pool resources, polycentric
-   governance), low for backgrounded ones. Not a flat distribution.
-
-6. Entities appearing only in citation position have lower final integral
-   values than entities appearing in subject position across multiple
-   sections.
-
-7. NUL entries are classified as never-set / unknown / cleared based on
-   integral history, not keyword matching. At least some schema-slot
-   absences are detected structurally.
-
-8. DEF crystallization timestamps correlate with coherence variance
-   drops — early for stable entities, later for high-churn hubs.
-
-9. Pronoun resolution confidence scores vary across the document: higher
-   where fewer compatible anchors are in the working set, lower where the
-   working set is dense. This is the fold producing genuine signal.
-
-10. EVA `frame_test` entries reference real anchors in `M.defFrames`.
-    Results are non-null and vary (not all `satisfies`). Highly salient
-    entities contribute more to EVA results than backgrounded ones.
-
-**EVA calibration:**
-
-11. Run calibration check. If flat rate > 60%, confirm document-specific
-    pseudo-centroids were bootstrapped and subsequent EVA entries show
-    lower flat rate than the first 100.
-
-**Log composition shift:**
-
-12. SIG count rises (co-occurrence evidence is now SIG).
-    CON count drops (only INS'd pairs).
-    INS count equals `M.entities.size`.
-    DEF(frame) count equals INS count.
-    NUL count rises (structural absences detected, not just keyword matches).
+**Site-face routing:**
+13. NPs filtered by `isDisplayableEntity` cluster on Background-site
+    clause classification at rate > 0.7. This verifies that
+    `isDisplayableEntity` was an unprincipled approximation of Site-face
+    routing. Test enables the replacement to be data-justified.
